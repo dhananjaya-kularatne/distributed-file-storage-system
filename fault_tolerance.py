@@ -5,6 +5,8 @@ import os
 import time
 from config import NODES, BUFFER_SIZE, STORAGE_DIR
 
+HEARTBEAT_INTERVAL = 2  # 2 seconds
+
 class Node:
     def __init__(self, node_id):
         self.node_id = node_id
@@ -19,6 +21,8 @@ class Node:
 
     def start(self):
         threading.Thread(target=self._listen, daemon=True).start()
+
+        threading.Thread(target=self._send_heartbeats, daemon=True).start()
         print(f"[{self.node_id}] Started on {self.host}:{self.port}")
 
     def _listen(self):
@@ -76,17 +80,25 @@ class Node:
             print(f"[{self.node_id}] Couldnt reach {target_id}: {e}")
             return None
 
+    # sending heartbeats to peers every 2 seconds
+    def _send_heartbeats(self):
+        while self.is_alive:
+            for peer_id in self.peers:
+                response = self.send_message(peer_id, {
+                    "type": "heartbeat",
+                    "from": self.node_id
+                })
+                if response:
+                    print(f"[{self.node_id}] Heartbeat response from {peer_id}: alive")
+                else:
+                    print(f"[{self.node_id}] No response from {peer_id}")
+            time.sleep(HEARTBEAT_INTERVAL)
+
 if __name__ == "__main__":
     import sys
     node = Node(sys.argv[1])
     node.start()
-    time.sleep(2)
 
-    # test sending a message from node1 to node2
-    if node.node_id == "node1":
-        response = node.send_message("node2", {"type": "hello", "from": "node1"})
-        print(f"[node1] Response from node2: {response}")
-        
     try:
         while True:
             time.sleep(1)
