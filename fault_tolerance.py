@@ -6,6 +6,7 @@ import time
 from config import NODES, BUFFER_SIZE, STORAGE_DIR
 
 HEARTBEAT_INTERVAL = 2  # 2 seconds
+HEARTBEAT_TIMEOUT = 5   # seconds - time before marking a node as failed
 
 class Node:
     def __init__(self, node_id):
@@ -15,14 +16,19 @@ class Node:
         self.peers = {nid: info for nid, info in NODES.items() if nid != node_id}
         self.is_alive = True
 
+        
+        # tracking failed nodes
+        self.failed_nodes = set()
+        self.last_heartbeat = {nid: time.time() + 5 for nid in self.peers}
+
         # setting up the storage folder for this node
         self.storage_path = os.path.join(STORAGE_DIR, node_id)
         os.makedirs(self.storage_path, exist_ok=True)
 
     def start(self):
         threading.Thread(target=self._listen, daemon=True).start()
-
         threading.Thread(target=self._send_heartbeats, daemon=True).start()
+        threading.Thread(target=self._check_failures, daemon=True).start()
         print(f"[{self.node_id}] Started on {self.host}:{self.port}")
 
     def _listen(self):
@@ -89,11 +95,21 @@ class Node:
                     "from": self.node_id
                 })
                 if response:
+                    self.last_heartbeat[peer_id] = time.time()  #upates the last heartbeat time
                     print(f"[{self.node_id}] Heartbeat response from {peer_id}: alive")
                 else:
                     print(f"[{self.node_id}] No response from {peer_id}")
             time.sleep(HEARTBEAT_INTERVAL)
 
+    def _check_failures(self):
+        while self.is_alive:
+            for peer_id in self.peers:
+                time_since_last = time.time() - self.last_heartbeat[peer_id]
+                if time_since_last > HEARTBEAT_TIMEOUT:
+                    if peer_id not in self.failed_nodes:
+                        self.failed_nodes.add(peer_id)
+                        print(f"[{self.node_id}] {peer_id} has FAILED! No heartbeat for {time_since_last:.1f}s")
+            time.sleep(1)
 if __name__ == "__main__":
     import sys
     node = Node(sys.argv[1])
