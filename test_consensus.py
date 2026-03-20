@@ -47,3 +47,18 @@ def test_higher_term_causes_step_down():
     assert elected is False
     assert n1.state == Role.FOLLOWER
     assert n1.current_term == 5
+
+
+def test_persistent_state(tmp_path):
+    state_dir = tmp_path
+    n = Node("p1", peers=[], state_dir=state_dir)
+    n.current_term = 3
+    n.voted_for = "p2"
+    n.log = [{"term": 1, "cmd": "x"}]
+    n.persist_state()
+
+    # new instance should load persisted values
+    n2 = Node("p1", peers=[], state_dir=state_dir)
+    assert n2.current_term == 3
+    assert n2.voted_for == "p2"
+    assert n2.log == [{"term": 1, "cmd": "x"}]

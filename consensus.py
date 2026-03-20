@@ -1,5 +1,8 @@
 from enum import Enum
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Union
+import json
+import os
+from pathlib import Path
 
 
 class Role(Enum):
@@ -16,9 +19,17 @@ class Node:
     and replication in later steps.
     """
 
-    def __init__(self, node_id: str, peers: Optional[List[str]] = None):
+    def __init__(self, node_id: str, peers: Optional[List[str]] = None, state_dir: Optional[Union[str, Path]] = None):
         self.id = node_id
         self.peers: List[str] = peers or []
+
+        # Where to store persistent state files
+        self.state_dir: Path = Path(state_dir) if state_dir is not None else Path(".")
+        try:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            # best-effort; tests may run in directories without explicit perms
+            pass
 
         # Persistent state on all servers
         self.current_term: int = 0
@@ -36,10 +47,50 @@ class Node:
         # Role
         self.state: Role = Role.FOLLOWER
 
+        # Load persisted state if present
+        self.load_state()
+
     def become_follower(self, term: int, leader_id: Optional[str] = None) -> None:
         self.state = Role.FOLLOWER
         self.current_term = term
         self.voted_for = None
+
+    # --- Persistence helpers ---
+    def _state_file(self) -> Path:
+        return self.state_dir / f"raft_state_{self.id}.json"
+
+    def persist_state(self) -> None:
+        """Persist `current_term`, `voted_for`, and `log` atomically to disk."""
+        data = {
+            "current_term": self.current_term,
+            "voted_for": self.voted_for,
+            "log": self.log,
+        }
+        target = self._state_file()
+        tmp = target.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        # atomic replace
+        os.replace(str(tmp), str(target))
+
+    def load_state(self) -> None:
+        """Load persisted state if available. If file missing, do nothing."""
+        target = self._state_file()
+        if not target.exists():
+            return
+        try:
+            with target.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            self.current_term = int(data.get("current_term", self.current_term))
+            vf = data.get("voted_for")
+            self.voted_for = vf if vf is None or isinstance(vf, str) else None
+            self.log = data.get("log", self.log)
+        except Exception:
+            # If corrupted, ignore and start fresh (higher-level code may handle recovery)
+            return
 
     def become_candidate(self) -> None:
         self.state = Role.CANDIDATE
