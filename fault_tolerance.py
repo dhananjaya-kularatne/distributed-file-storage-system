@@ -96,6 +96,12 @@ class Node:
                 })
                 if response:
                     self.last_heartbeat[peer_id] = time.time()  #upates the last heartbeat time
+
+                    # node will be marked as recovered if it was previously failed
+                    if peer_id in self.failed_nodes:   
+                        print(f"[{self.node_id}] {peer_id} is back online!")
+                        self.failed_nodes.discard(peer_id)
+
                     print(f"[{self.node_id}] Heartbeat response from {peer_id}: alive")
                 else:
                     print(f"[{self.node_id}] No response from {peer_id}")
