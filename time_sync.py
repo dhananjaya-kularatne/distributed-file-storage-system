@@ -44,6 +44,22 @@ class TimeNode:
             handler.daemon = True
             handler.start()
 
+    def connect_to_node(self, target_node_id):
+        """Create a TCP socket and attempt to connect to another node."""
+        try:
+            target_config = NODES[target_node_id]
+            host = target_config["host"]
+            port = target_config["port"]
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.connect((host, port))
+            print(f"[{self.node_id}] Successfully connected to {target_node_id} ({host}:{port})")
+            return sock
+        except Exception as e:
+            print(f"[{self.node_id}] Failed to connect to {target_node_id}: {e}")
+            return None
+
+
 if __name__ == "__main__":
     import sys
     node = TimeNode(sys.argv[1])
