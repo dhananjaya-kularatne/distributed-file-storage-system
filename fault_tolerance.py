@@ -62,7 +62,7 @@ class Node:
 
                 # handles incoming file save request
                 if message.get("type") == "save_file":
-                    self.save_file(message["filename"], message["data"])
+                    self._save_local(message["filename"], message["data"])
                     conn.sendall(json.dumps({"status": "ok"}).encode())
                 else:
                     conn.sendall(json.dumps({"status": "ok"}).encode())
@@ -72,6 +72,13 @@ class Node:
             print(f"[{self.node_id}] Connection error: {e}")
         finally:
             conn.close()
+
+    # save file locally without replicating
+    def _save_local(self, filename, data):
+        filepath = os.path.join(self.storage_path, filename)
+        with open(filepath, "w") as f:
+            f.write(data)
+        print(f"[{self.node_id}] Saved file locally: {filename}")
 
     def send_message(self, target_id, message):
         host = self.peers[target_id]["host"]
@@ -131,6 +138,8 @@ class Node:
             f.write(data)
         print(f"[{self.node_id}] Saved file: {filename}")
 
+        self._replicate_file(filename, data) # this would replicate file to alive nodes
+
     # load file from local storage
     def load_file(self, filename):
         filepath = os.path.join(self.storage_path, filename)
@@ -143,17 +152,32 @@ class Node:
     def list_files(self):
         return os.listdir(self.storage_path)
 
+
+    # replicate file to all alive peer nodes
+    def _replicate_file(self, filename, data):
+        for peer_id in self.peers:
+            if peer_id not in self.failed_nodes:
+                response = self.send_message(peer_id, {
+                    "type": "save_file",
+                    "filename": filename,
+                    "data": data
+                })
+                if response and response.get("status") == "ok":
+                    print(f"[{self.node_id}] Replicated {filename} to {peer_id}")
+                else:
+                    print(f"[{self.node_id}] Failed to replicate {filename} to {peer_id}")
+
 if __name__ == "__main__":
     import sys
     node = Node(sys.argv[1])
     node.start()
+    time.sleep(2)
 
-    #  # test saving a file on node1 and reading it back
+    # test replication from node1 to all peers
     if node.node_id == "node1":
-        node.save_file("test.txt", "hello from node1")
-        data = node.load_file("test.txt")
-        print(f"[node1] Loaded file: {data}")
-        print(f"[node1] All files: {node.list_files()}")
+        node.save_file("replicated.txt", "this file should be on all nodes")
+        time.sleep(1)
+        print(f"[node1] Files: {node.list_files()}")
 
     try:
         while True:
