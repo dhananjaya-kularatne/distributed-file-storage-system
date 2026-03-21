@@ -40,9 +40,20 @@ class TimeNode:
         while True:
             conn, addr = server_sock.accept()
             print(f"[{self.node_id}] Connection from {addr}")
-            handler = threading.Thread(target=lambda c: c.close(), args=(conn,))
+            handler = threading.Thread(target=self.handle_time_request, args=(conn,))
             handler.daemon = True
             handler.start()
+
+    def handle_time_request(self, conn):
+        """Send current node time as JSON and close the connection."""
+        try:
+            current_time = time.time()
+            response = json.dumps({"timestamp": current_time})
+            conn.sendall(response.encode('utf-8'))
+        except Exception as e:
+            print(f"[{self.node_id}] Error handling time request: {e}")
+        finally:
+            conn.close()
 
     def connect_to_node(self, target_node_id):
         """Create a TCP socket and attempt to connect to another node."""
