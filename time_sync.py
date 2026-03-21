@@ -70,6 +70,40 @@ class TimeNode:
             print(f"[{self.node_id}] Failed to connect to {target_node_id}: {e}")
             return None
 
+    def sync_with_server(self, target_node_id):
+        """Synchronize node clock using Cristian's algorithm."""
+        try:
+            send_time = time.time()
+            sock = self.connect_to_node(target_node_id)
+            if sock is None:
+                return None
+
+            sock.sendall(b"time_request")
+            data = sock.recv(BUFFER_SIZE)
+            receive_time = time.time()
+            sock.close()
+
+            if not data:
+                return None
+
+            response = json.loads(data.decode('utf-8'))
+            server_timestamp = response["timestamp"]
+
+            rtt = receive_time - send_time
+            estimated_server_time = server_timestamp + (rtt / 2)
+            current_local_time = time.time()
+            self.clock_offset = estimated_server_time - current_local_time
+
+            print(f"[{self.node_id}] Synced with {target_node_id}")
+            print(f"[{self.node_id}] RTT: {rtt:.4f}s")
+            print(f"[{self.node_id}] Estimated server time: {estimated_server_time:.4f}")
+            print(f"[{self.node_id}] Clock offset: {self.clock_offset:.4f}s")
+
+            return self.clock_offset
+        except Exception as e:
+            print(f"[{self.node_id}] Failed to sync with {target_node_id}: {e}")
+            return None
+
 
 if __name__ == "__main__":
     import sys
