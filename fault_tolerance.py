@@ -59,8 +59,15 @@ class Node:
             if data:
                 message = json.loads(data.decode())
                 print(f"[{self.node_id}] Received: {message}")
-                conn.sendall(json.dumps({"status": "ok"}).encode())
+
+                # handles incoming file save request
+                if message.get("type") == "save_file":
+                    self.save_file(message["filename"], message["data"])
+                    conn.sendall(json.dumps({"status": "ok"}).encode())
+                else:
+                    conn.sendall(json.dumps({"status": "ok"}).encode())
                 conn.shutdown(socket.SHUT_WR)
+            
         except Exception as e:
             print(f"[{self.node_id}] Connection error: {e}")
         finally:
@@ -116,10 +123,37 @@ class Node:
                         self.failed_nodes.add(peer_id)
                         print(f"[{self.node_id}] {peer_id} has FAILED! No heartbeat for {time_since_last:.1f}s")
             time.sleep(1)
+
+    # checkpointing - save file to local storage
+    def save_file(self, filename, data):
+        filepath = os.path.join(self.storage_path, filename)
+        with open(filepath, "w") as f:
+            f.write(data)
+        print(f"[{self.node_id}] Saved file: {filename}")
+
+    # load file from local storage
+    def load_file(self, filename):
+        filepath = os.path.join(self.storage_path, filename)
+        if os.path.exists(filepath):
+            with open(filepath, "r") as f:
+                return f.read()
+        return None
+
+    # list all files in local storage
+    def list_files(self):
+        return os.listdir(self.storage_path)
+
 if __name__ == "__main__":
     import sys
     node = Node(sys.argv[1])
     node.start()
+
+    #  # test saving a file on node1 and reading it back
+    if node.node_id == "node1":
+        node.save_file("test.txt", "hello from node1")
+        data = node.load_file("test.txt")
+        print(f"[node1] Loaded file: {data}")
+        print(f"[node1] All files: {node.list_files()}")
 
     try:
         while True:
