@@ -64,6 +64,12 @@ class Node:
                 if message.get("type") == "save_file":
                     self._save_local(message["filename"], message["data"])
                     conn.sendall(json.dumps({"status": "ok"}).encode())
+
+                elif message.get("type") == "recovery_sync":
+                    self._save_local(message["filename"], message["data"])
+                    print(f"[{self.node_id}] Restored file from checkpoint: {message['filename']}")
+                    conn.sendall(json.dumps({"status": "ok"}).encode())
+                
                 else:
                     conn.sendall(json.dumps({"status": "ok"}).encode())
                 conn.shutdown(socket.SHUT_WR)
@@ -115,6 +121,7 @@ class Node:
                     if peer_id in self.failed_nodes:   
                         print(f"[{self.node_id}] {peer_id} is back online!")
                         self.failed_nodes.discard(peer_id)
+                        self._trigger_recovery(peer_id) # trigger recovery when node comes back online
 
                     print(f"[{self.node_id}] Heartbeat response from {peer_id}: alive")
                 else:
@@ -167,17 +174,26 @@ class Node:
                 else:
                     print(f"[{self.node_id}] Failed to replicate {filename} to {peer_id}")
 
+    # checkpointing and rollback recovery
+    # push all files to the recovered node from this node's storage
+    def _trigger_recovery(self, recovered_node_id):
+        print(f"[{self.node_id}] Starting recovery for {recovered_node_id}...")
+        for filename in self.list_files():
+            data = self.load_file(filename)
+            response = self.send_message(recovered_node_id, {
+                "type": "recovery_sync",
+                "filename": filename,
+                "data": data
+            })
+            if response and response.get("status") == "ok":
+                print(f"[{self.node_id}] Recovered {filename} to {recovered_node_id}")
+            else:
+                print(f"[{self.node_id}] Failed to recover {filename} to {recovered_node_id}")
+
 if __name__ == "__main__":
     import sys
     node = Node(sys.argv[1])
     node.start()
-    time.sleep(2)
-
-    # test replication from node1 to all peers
-    if node.node_id == "node1":
-        node.save_file("replicated.txt", "this file should be on all nodes")
-        time.sleep(1)
-        print(f"[node1] Files: {node.list_files()}")
 
     try:
         while True:
