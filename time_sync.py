@@ -104,6 +104,18 @@ class TimeNode:
             print(f"[{self.node_id}] Failed to sync with {target_node_id}: {e}")
             return None
 
+    def start_periodic_sync(self, target_node_id, interval=10):
+        """Run sync_with_server in a background daemon thread on a fixed interval."""
+        def _sync_loop():
+            while True:
+                self.sync_with_server(target_node_id)
+                time.sleep(interval)
+
+        t = threading.Thread(target=_sync_loop)
+        t.daemon = True
+        t.start()
+        print(f"[{self.node_id}] Periodic sync started with {target_node_id} every {interval}s")
+
 
 if __name__ == "__main__":
     import sys
@@ -113,5 +125,6 @@ if __name__ == "__main__":
     print(f"[{node.node_id}] Clock offset: {node.clock_offset}")
     print(f"[{node.node_id}] Lamport clock: {node.lamport_clock}")
     node.start()
+    node.start_periodic_sync("node2")
     while True:
         time.sleep(1)
