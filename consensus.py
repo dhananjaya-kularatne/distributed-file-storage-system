@@ -2,6 +2,7 @@ from enum import Enum
 from typing import List, Optional, Dict, Union
 import json
 import os
+import time
 from pathlib import Path
 
 
@@ -46,6 +47,10 @@ class Node:
 
         # Role
         self.state: Role = Role.FOLLOWER
+
+        # Leader tracking and heartbeat timestamp (for follower election timers)
+        self.leader_id: Optional[str] = None
+        self.last_heartbeat: float = 0.0
 
         # Load persisted state if present
         self.load_state()
@@ -114,21 +119,84 @@ class Node:
 
         Returns a dict with keys `voteGranted` (bool) and `term` (int).
         """
+        # Reject if candidate's term is stale
         if candidate_term < self.current_term:
             return {"voteGranted": False, "term": self.current_term}
 
         # If candidate has higher term, update and become follower
         if candidate_term > self.current_term:
             self.become_follower(candidate_term)
+            # persist term change
+            try:
+                self.persist_state()
+            except Exception:
+                pass
 
-        # Simple log up-to-date check: prefer candidate if its last index is >= ours
+        # Log up-to-date check: compare last log term, then index
         local_last_index = len(self.log) - 1
-        if self.voted_for is None or self.voted_for == candidate_id:
-            if last_log_index >= local_last_index:
-                self.voted_for = candidate_id
-                return {"voteGranted": True, "term": self.current_term}
+        local_last_term = self.log[-1]["term"] if self.log else 0
+
+        candidate_up_to_date = False
+        if last_log_term > local_last_term:
+            candidate_up_to_date = True
+        elif last_log_term == local_last_term and last_log_index >= local_last_index:
+            candidate_up_to_date = True
+
+        if (self.voted_for is None or self.voted_for == candidate_id) and candidate_up_to_date:
+            self.voted_for = candidate_id
+            try:
+                self.persist_state()
+            except Exception:
+                pass
+            return {"voteGranted": True, "term": self.current_term}
 
         return {"voteGranted": False, "term": self.current_term}
+
+    def on_append_entries(self, leader_id: str, leader_term: int, prev_log_index: int = -1, prev_log_term: int = 0, entries: Optional[List[dict]] = None, leader_commit: Optional[int] = None):
+        """Handle AppendEntries RPC (used for heartbeats and replication).
+
+        Returns dict with `success` and `term` keys. On valid leader term, reset
+        the follower's heartbeat timer (`last_heartbeat`) and record leader id.
+        """
+        if leader_term < self.current_term:
+            return {"success": False, "term": self.current_term}
+
+        # If leader has higher term, update and become follower
+        if leader_term > self.current_term:
+            self.become_follower(leader_term, leader_id)
+            try:
+                self.persist_state()
+            except Exception:
+                pass
+
+        # At this point leader_term >= current_term
+        self.leader_id = leader_id
+        # reset heartbeat timestamp
+        self.last_heartbeat = time.time()
+
+        # Basic log matching check for prev_log; if mismatch, reject
+        if prev_log_index != -1:
+            if prev_log_index >= len(self.log):
+                return {"success": False, "term": self.current_term}
+            if self.log[prev_log_index].get("term", 0) != prev_log_term:
+                return {"success": False, "term": self.current_term}
+
+        # Append any new entries (heartbeat if entries is empty)
+        if entries:
+            # naive append: overwrite conflicting entries
+            insert_at = prev_log_index + 1
+            # truncate and append
+            self.log = self.log[:insert_at] + entries
+            try:
+                self.persist_state()
+            except Exception:
+                pass
+
+        # Update commit index if leader_commit provided
+        if leader_commit is not None:
+            self.commit_index = min(leader_commit, len(self.log) - 1)
+
+        return {"success": True, "term": self.current_term}
 
     # --- Candidate behavior: start election ---
     def start_election(self, peers_map: Dict[str, 'Node']) -> bool:

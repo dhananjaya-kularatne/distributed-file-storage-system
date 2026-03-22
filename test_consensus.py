@@ -62,3 +62,28 @@ def test_persistent_state(tmp_path):
     assert n2.current_term == 3
     assert n2.voted_for == "p2"
     assert n2.log == [{"term": 1, "cmd": "x"}]
+
+
+def test_append_entries_heartbeat_resets_timer():
+    f = Node("f1", peers=["l1"])
+    assert f.last_heartbeat == 0.0
+    resp = f.on_append_entries(leader_id="l1", leader_term=1)
+    assert resp["success"] is True
+    assert f.current_term == 1
+    assert f.state == Role.FOLLOWER
+    assert f.leader_id == "l1"
+    assert f.last_heartbeat > 0
+
+
+def test_request_vote_up_to_date_logic():
+    f = Node("f1", peers=[])
+    # follower has a log with last term = 2
+    f.log = [{"term": 2, "cmd": "x"}]
+
+    # candidate with older last_log_term should be rejected
+    resp = f.on_request_vote(candidate_id="c1", candidate_term=1, last_log_index=0, last_log_term=1)
+    assert resp["voteGranted"] is False
+
+    # candidate with equal last_log_term and index should be granted
+    resp = f.on_request_vote(candidate_id="c2", candidate_term=1, last_log_index=0, last_log_term=2)
+    assert resp["voteGranted"] is True
