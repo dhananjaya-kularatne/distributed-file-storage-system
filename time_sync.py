@@ -116,6 +116,12 @@ class TimeNode:
         t.start()
         print(f"[{self.node_id}] Periodic sync started with {target_node_id} every {interval}s")
 
+    def get_adjusted_time(self):
+        """Return local time adjusted by the stored clock offset."""
+        adjusted = time.time() + self.clock_offset
+        print(f"[{self.node_id}] Adjusted time: {adjusted:.4f}")
+        return adjusted
+
 
 if __name__ == "__main__":
     import sys
