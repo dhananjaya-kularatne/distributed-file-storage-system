@@ -82,8 +82,47 @@ def test_replication():
     node3.is_alive = False
     time.sleep(1)
 
+def test_recovery():
+    print("\n=== Test 4: Checkpointing and Rollback Recovery ===")
+    node1 = Node("node1")
+    node2 = Node("node2")
+    node1.start()
+    node2.start()
+
+    time.sleep(4)
+
+    # save a file on node1 so it replicates to node2
+    print("Saving file on node1...")
+    node1.save_file("recovery_test.txt", "this should be recovered")
+    time.sleep(2)
+
+    # simulate node2 failure
+    print("Simulating node2 failure...")
+    node2.is_alive = False
+    time.sleep(7)
+
+    # bring node2 back online
+    print("Bringing node2 back online...")
+    node2_recovered = Node("node2")
+    node2_recovered.start()
+    time.sleep(7)
+
+    # check if node2 got its files back
+    data = node2_recovered.load_file("recovery_test.txt")
+    print(f"Recovered data: {data}")
+
+    if data == "this should be recovered":
+        print("PASSED - node2 recovered its files after rejoining")
+    else:
+        print("FAILED - recovery did not work correctly")
+
+    node1.is_alive = False
+    node2_recovered.is_alive = False
+    time.sleep(1)
+
 
 if __name__ == "__main__":
     test_heartbeat()
     test_failure_detection()
     test_replication()
+    test_recovery()
