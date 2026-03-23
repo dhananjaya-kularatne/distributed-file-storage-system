@@ -3,6 +3,7 @@ from typing import List, Optional, Dict, Union
 import json
 import os
 import time
+import random
 from pathlib import Path
 
 
@@ -51,6 +52,11 @@ class Node:
         # Leader tracking and heartbeat timestamp (for follower election timers)
         self.leader_id: Optional[str] = None
         self.last_heartbeat: float = 0.0
+
+        # Election timeout base in milliseconds. Election timeout is randomized
+        # per Raft to a value in [base, 2*base] ms. Tests can override base.
+        self.base_election_timeout_ms: int = 150
+        self.election_timeout_sec: float = self._random_election_timeout()
 
         # Load persisted state if present
         self.load_state()
@@ -101,6 +107,28 @@ class Node:
         self.state = Role.CANDIDATE
         self.current_term += 1
         self.voted_for = self.id
+
+        # When becoming candidate, reset election timer to avoid immediate re-election
+        self.reset_election_timer()
+
+    def _random_election_timeout(self) -> float:
+        return random.uniform(self.base_election_timeout_ms, 2 * self.base_election_timeout_ms) / 1000.0
+
+    def reset_election_timer(self) -> None:
+        """Reset the election timer (set new randomized timeout and update last heartbeat time)."""
+        self.election_timeout_sec = self._random_election_timeout()
+        self.last_heartbeat = time.time()
+
+    def check_election_timeout(self, now: Optional[float] = None) -> bool:
+        """Check whether the election timeout has elapsed. If so, transition to Candidate and return True."""
+        if now is None:
+            now = time.time()
+        elapsed = now - self.last_heartbeat
+        if elapsed >= self.election_timeout_sec:
+            # no heartbeat in timeout window -> become candidate
+            self.become_candidate()
+            return True
+        return False
 
     def become_leader(self) -> None:
         self.state = Role.LEADER
@@ -171,8 +199,8 @@ class Node:
 
         # At this point leader_term >= current_term
         self.leader_id = leader_id
-        # reset heartbeat timestamp
-        self.last_heartbeat = time.time()
+        # reset heartbeat timestamp and election timeout
+        self.reset_election_timer()
 
         # Basic log matching check for prev_log; if mismatch, reject
         if prev_log_index != -1:

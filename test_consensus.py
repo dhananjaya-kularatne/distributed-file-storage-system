@@ -1,4 +1,5 @@
 from consensus import Node, Role
+import time
 
 
 def test_bootstrap_node_defaults():
@@ -87,3 +88,24 @@ def test_request_vote_up_to_date_logic():
     # candidate with equal last_log_term and index should be granted
     resp = f.on_request_vote(candidate_id="c2", candidate_term=1, last_log_index=0, last_log_term=2)
     assert resp["voteGranted"] is True
+
+
+def test_election_timeout_triggers_candidate():
+    n = Node("t1", peers=[], state_dir=None)
+    # make timeout small for test
+    n.base_election_timeout_ms = 1
+    n.election_timeout_sec = 0.001
+    # simulate last heartbeat far in the past
+    n.last_heartbeat = time.time() - 1.0
+    triggered = n.check_election_timeout()
+    assert triggered is True
+    assert n.state == Role.CANDIDATE
+
+
+def test_heartbeat_prevents_timeout():
+    n = Node("t2", peers=[], state_dir=None)
+    n.base_election_timeout_ms = 200
+    n.reset_election_timer()
+    # immediately check should not trigger
+    triggered = n.check_election_timeout(now=n.last_heartbeat + 0.001)
+    assert triggered is False
