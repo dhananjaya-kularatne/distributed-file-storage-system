@@ -3,7 +3,7 @@ import threading
 import json
 import os
 import time
-from config import NODES, BUFFER_SIZE, STORAGE_DIR
+from config import NODES, BUFFER_SIZE, STORAGE_DIR 
 
 class TimeNode:
     def __init__(self, node_id):
@@ -121,6 +121,16 @@ class TimeNode:
         adjusted = time.time() + self.clock_offset
         print(f"[{self.node_id}] Adjusted time: {adjusted:.4f}")
         return adjusted
+
+    def increment_lamport(self):
+        self.lamport_clock += 1
+        print(f"[{self.node_id}] Lamport clock incremented to {self.lamport_clock}")
+        return self.lamport_clock
+
+    def update_lamport(self, received_time):
+        self.lamport_clock = max(self.lamport_clock, received_time) + 1
+        print(f"[{self.node_id}] Lamport clock updated to {self.lamport_clock}")
+        return self.lamport_clock
 
 
 if __name__ == "__main__":
