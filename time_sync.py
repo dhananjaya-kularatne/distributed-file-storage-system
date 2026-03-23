@@ -132,6 +132,17 @@ class TimeNode:
         print(f"[{self.node_id}] Lamport clock updated to {self.lamport_clock}")
         return self.lamport_clock
 
+    def sync_with_fallback(self, target_node_id):
+        try:
+            result = self.sync_with_server(target_node_id)
+            if result is None:
+                self.increment_lamport()
+                print(f"[{self.node_id}] Time sync failed, falling back to Lamport clock.")
+            else:
+                print(f"[{self.node_id}] Sync succeeded with {target_node_id}.")
+        except Exception as e:
+            print(f"[{self.node_id}] Error in sync_with_fallback: {e}")
+
 
 if __name__ == "__main__":
     import sys
