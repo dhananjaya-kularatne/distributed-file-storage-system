@@ -143,6 +143,11 @@ class TimeNode:
         except Exception as e:
             print(f"[{self.node_id}] Error in sync_with_fallback: {e}")
 
+    def simulate_clock_skew(self, skew_seconds):
+        self.clock_offset += skew_seconds
+        print(f"[{self.node_id}] Applied clock skew: {skew_seconds}s. New clock offset: {self.clock_offset}s")
+        return self.clock_offset
+
 
 if __name__ == "__main__":
     import sys
@@ -152,6 +157,7 @@ if __name__ == "__main__":
     print(f"[{node.node_id}] Clock offset: {node.clock_offset}")
     print(f"[{node.node_id}] Lamport clock: {node.lamport_clock}")
     node.start()
+    node.simulate_clock_skew(0.5)
     node.start_periodic_sync("node2")
     while True:
         time.sleep(1)
