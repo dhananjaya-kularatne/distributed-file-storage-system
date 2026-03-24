@@ -137,6 +137,49 @@ class Node:
             # per Raft, leader initializes nextIndex to lastLogIndex+1
             self.next_index[p] = last_log_index + 1
             self.match_index[p] = -1
+        # Heartbeat interval in milliseconds (leader sends AppendEntries at this rate)
+        self.heartbeat_interval_ms: int = 50
+
+    def send_heartbeats(self, peers_map: Dict[str, 'Node']) -> None:
+        """Send AppendEntries (heartbeats) to all peers. This method performs
+        one round of heartbeats/replication; it does not start a background
+        thread. `peers_map` maps peer id -> Node instance.
+        """
+        if self.state != Role.LEADER:
+            return
+
+        for p in self.peers:
+            peer = peers_map.get(p)
+            if peer is None:
+                continue
+
+            next_idx = self.next_index.get(p, len(self.log))
+            prev_log_index = next_idx - 1
+            prev_log_term = self.log[prev_log_index]["term"] if prev_log_index >= 0 and prev_log_index < len(self.log) else 0
+            entries = self.log[next_idx:]
+
+            resp = peer.on_append_entries(
+                leader_id=self.id,
+                leader_term=self.current_term,
+                prev_log_index=prev_log_index,
+                prev_log_term=prev_log_term,
+                entries=entries,
+                leader_commit=self.commit_index,
+            )
+
+            # If peer reports higher term, step down
+            if resp.get("term", 0) > self.current_term:
+                self.become_follower(resp["term"])
+                return
+
+            if resp.get("success"):
+                # update match_index and next_index
+                matched = prev_log_index + len(entries)
+                self.match_index[p] = matched
+                self.next_index[p] = matched + 1
+            else:
+                # on failure, decrement next_index to retry next time
+                self.next_index[p] = max(0, self.next_index.get(p, 1) - 1)
 
     def __repr__(self) -> str:
         return f"<Node id={self.id} role={self.state.value} term={self.current_term} peers={len(self.peers)}>"

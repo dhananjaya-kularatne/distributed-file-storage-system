@@ -109,3 +109,38 @@ def test_heartbeat_prevents_timeout():
     # immediately check should not trigger
     triggered = n.check_election_timeout(now=n.last_heartbeat + 0.001)
     assert triggered is False
+
+
+def test_send_heartbeats_replication_round():
+    # leader has initial prefix log and will append one new entry to replicate
+    leader = Node("l1", peers=["f1", "f2"]) 
+    # initialize leader log with two entries
+    leader.log = [{"term": 1, "cmd": "x"}, {"term": 1, "cmd": "y"}]
+    leader.current_term = 2
+
+    # followers have the prefix (so replication of new entry should succeed)
+    f1 = Node("f1", peers=["l1", "f2"])
+    f2 = Node("f2", peers=["l1", "f1"])
+    f1.log = leader.log.copy()
+    f2.log = leader.log.copy()
+
+    peers = {"l1": leader, "f1": f1, "f2": f2}
+
+    leader.become_leader()
+    # leader appends a new entry at index 2
+    leader.log.append({"term": leader.current_term, "cmd": "z"})
+
+    # send one round of heartbeats/replication
+    leader.send_heartbeats(peers)
+
+    # followers should have received heartbeat and appended the new entry
+    assert f1.last_heartbeat > 0
+    assert f2.last_heartbeat > 0
+    assert f1.log[-1]["cmd"] == "z"
+    assert f2.log[-1]["cmd"] == "z"
+
+    # leader's match_index and next_index updated
+    assert leader.match_index["f1"] == 2
+    assert leader.match_index["f2"] == 2
+    assert leader.next_index["f1"] == 3
+    assert leader.next_index["f2"] == 3
