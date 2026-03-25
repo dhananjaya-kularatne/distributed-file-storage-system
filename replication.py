@@ -1,6 +1,7 @@
 import os
 import json
 import socket
+import base64
 from config import NODES, BUFFER_SIZE, STORAGE_DIR
 
 class Replicator:
@@ -17,12 +18,17 @@ class Replicator:
         """
         Called by the LEADER.
         Asynchronously pushes the uploaded file to all follower nodes.
-        file_data is expected to be a string or base64 encoded string if binary.
+        file_data can be a normal string OR binary bytes. We handle binary by Base64 encoding it.
         """
+        
+        is_binary = isinstance(file_data, bytes)
+        encoded_data = base64.b64encode(file_data).decode('utf-8') if is_binary else file_data
+
         message = {
             "type": "replicate_file",
             "filename": filename,
-            "data": file_data,
+            "data": encoded_data,
+            "is_binary": is_binary,
             "lamport_clock": lamport_clock
         }
 
@@ -36,7 +42,10 @@ class Replicator:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(3.0)  # 3 seconds timeout
                 s.connect((host, port))
-                s.sendall(json.dumps(message).encode('utf-8'))
+                
+                # Convert the message to JSON and encode it to bytes
+                payload = json.dumps(message).encode('utf-8')
+                s.sendall(payload)
                 
                 # We do not strictly wait for an 'ok' here because it's asynchronous
                  # but we can do a quick recv if needed.
@@ -50,10 +59,11 @@ class Replicator:
         from the Leader. Saves the file to disk and records the lamport clock.
         """
         filename = message.get("filename")
-        file_data = message.get("data")
+        encoded_data = message.get("data")
+        is_binary = message.get("is_binary", False)
         lamport_clock = message.get("lamport_clock", 0)
 
-        if not filename or not file_data:
+        if not filename or encoded_data is None:
             print(f"[{self.node_id}] Received invalid replication message: missing filename or data")
             return
 
@@ -61,8 +71,16 @@ class Replicator:
         meta_path = file_path + ".meta"
 
         try:
-            # Save the actual file text data
-            with open(file_path, "w", encoding="utf-8") as f:
+            # Decode the data appropriately
+            if is_binary:
+                file_data = base64.b64decode(encoded_data)
+                mode = "wb"
+            else:
+                file_data = encoded_data
+                mode = "w"
+
+            # Save the actual file text/binary data
+            with open(file_path, mode, encoding="utf-8" if not is_binary else None) as f:
                 f.write(file_data)
             
             # Save metadata (the lamport clock) separately
