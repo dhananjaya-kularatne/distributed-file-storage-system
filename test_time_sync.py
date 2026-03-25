@@ -37,5 +37,18 @@ class TestTimeSync(unittest.TestCase):
         # Verify it is now max(3, 10) + 1 = 11
         self.assertEqual(updated_val, 11)
 
+    def test_sync_failure_fallback(self):
+        # Create a TimeNode for node1
+        node = TimeNode("node1")
+        
+        # Record Lamport clock before fallback
+        initial_lamport = node.lamport_clock
+        
+        # Call sync_with_fallback with "node2" (which will fail)
+        node.sync_with_fallback("node2")
+        
+        # Verify Lamport clock is incremented by exactly 1
+        self.assertEqual(node.lamport_clock, initial_lamport + 1)
+
 if __name__ == "__main__":
     unittest.main()
