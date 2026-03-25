@@ -1,3 +1,13 @@
+"""
+IT24103431 - KULARATNE R.A.D
+
+Techniques used:
+- Replication (Factor of 3): Every file is copied to all alive nodes
+- Heartbeat with Timeout: Nodes ping peers every 2 seconds to detect failures
+- Checkpointing and Rollback Recovery: Failed nodes restore files when they rejoin
+
+"""
+
 import socket
 import threading
 import json
@@ -25,12 +35,14 @@ class Node:
         self.storage_path = os.path.join(STORAGE_DIR, node_id)
         os.makedirs(self.storage_path, exist_ok=True)
 
+    # starts the node by launching 3 threads
     def start(self):
         threading.Thread(target=self._listen, daemon=True).start()
         threading.Thread(target=self._send_heartbeats, daemon=True).start()
         threading.Thread(target=self._check_failures, daemon=True).start()
         print(f"[{self.node_id}] Started on {self.host}:{self.port}")
 
+    # listen for incoming connections
     def _listen(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -48,6 +60,7 @@ class Node:
                 except Exception as e:
                     print(f"[{self.node_id}] Error: {e}")
 
+    # handles incoming connections and route to correct handler
     def _handle_connection(self, conn):
         try:
             data = b""
@@ -86,6 +99,7 @@ class Node:
             f.write(data)
         print(f"[{self.node_id}] Saved file locally: {filename}")
 
+    # send message to another node and return the response
     def send_message(self, target_id, message):
         host = self.peers[target_id]["host"]
         port = self.peers[target_id]["port"]
@@ -128,6 +142,7 @@ class Node:
                     print(f"[{self.node_id}] No response from {peer_id}")
             time.sleep(HEARTBEAT_INTERVAL)
 
+    # check if any peer has not responded within the timeout period
     def _check_failures(self):
         while self.is_alive:
             for peer_id in self.peers:
