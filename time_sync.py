@@ -1,3 +1,10 @@
+"""
+time_sync.py
+This module implements a TimeNode class for managing distributed clock synchronization.
+It provides features for synchronizing with a time server using Cristian's algorithm,
+as well as a fallback mechanism using Lamport logical clocks for ordering events.
+"""
+
 import socket
 import threading
 import json
@@ -89,6 +96,8 @@ class TimeNode:
             response = json.loads(data.decode('utf-8'))
             server_timestamp = response["timestamp"]
 
+            # Calculate the round-trip time (RTT) and estimate the server time
+            # based on Cristian's algorithm (server time + half of RTT)
             rtt = receive_time - send_time
             estimated_server_time = server_timestamp + (rtt / 2)
             current_local_time = time.time()
@@ -123,16 +132,21 @@ class TimeNode:
         return adjusted
 
     def increment_lamport(self):
+        """Increment the Lamport logical clock by 1."""
         self.lamport_clock += 1
         print(f"[{self.node_id}] Lamport clock incremented to {self.lamport_clock}")
         return self.lamport_clock
 
     def update_lamport(self, received_time):
+        """Update the Lamport clock based on a received timestamp."""
+        # The new Lamport clock value is the maximum of the local clock
+        # and the received clock, plus 1 to ensure strict ordering
         self.lamport_clock = max(self.lamport_clock, received_time) + 1
         print(f"[{self.node_id}] Lamport clock updated to {self.lamport_clock}")
         return self.lamport_clock
 
     def sync_with_fallback(self, target_node_id):
+        """Attempt to synchronize with a server, falling back to Lamport clock if it fails."""
         try:
             result = self.sync_with_server(target_node_id)
             if result is None:
@@ -144,6 +158,7 @@ class TimeNode:
             print(f"[{self.node_id}] Error in sync_with_fallback: {e}")
 
     def simulate_clock_skew(self, skew_seconds):
+        """Artificially add skew to the clock offset for testing purposes."""
         self.clock_offset += skew_seconds
         print(f"[{self.node_id}] Applied clock skew: {skew_seconds}s. New clock offset: {self.clock_offset}s")
         return self.clock_offset

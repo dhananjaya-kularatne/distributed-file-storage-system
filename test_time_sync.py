@@ -1,9 +1,16 @@
+"""
+test_time_sync.py
+This module contains unit tests for the TimeNode class, verifying
+clock synchronization accuracy and Lamport clock functionality.
+"""
+
 import unittest
 import time
 from time_sync import TimeNode
 
 class TestTimeSync(unittest.TestCase):
     def test_clock_sync_accuracy(self):
+        """Test if the clock offset is correctly applied via get_adjusted_time."""
         # Create a TimeNode for node1
         node = TimeNode("node1")
         
@@ -20,6 +27,7 @@ class TestTimeSync(unittest.TestCase):
         self.assertAlmostEqual(adjusted_time, current_time + skew_amount, delta=0.1)
 
     def test_lamport_clock_ordering(self):
+        """Test incrementing and updating the Lamport clock according to its rules."""
         # Create a TimeNode for node1
         node = TimeNode("node1")
         
@@ -38,6 +46,7 @@ class TestTimeSync(unittest.TestCase):
         self.assertEqual(updated_val, 11)
 
     def test_sync_failure_fallback(self):
+        """Test that the node falls back to its Lamport clock when sync fails."""
         # Create a TimeNode for node1
         node = TimeNode("node1")
         
