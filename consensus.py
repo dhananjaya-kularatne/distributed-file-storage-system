@@ -4,8 +4,15 @@ import json
 import os
 import time
 import random
+import socket
+import threading
+from config import NODES, BUFFER_SIZE
 from pathlib import Path
 
+# ADD ELECTION_TIMEOUT constants
+ELECTION_TIMEOUT_MIN = 0.5
+ELECTION_TIMEOUT_MAX = 1.0
+HEARTBEAT_INTERVAL = 0.1
 
 class Role(Enum):
     FOLLOWER = "Follower"
@@ -150,6 +157,7 @@ class Node:
 
     def become_leader(self) -> None:
         self.state = Role.LEADER
+        self.leader_id = self.id
         last_log_index = len(self.log) - 1
         for p in self.peers:
             # per Raft, leader initializes nextIndex to lastLogIndex+1
@@ -430,3 +438,161 @@ class Node:
             return True
 
         return False
+
+    def send_message(self, target_id, message):
+        """Send a message to another node via socket."""
+        host = NODES[target_id]["host"]
+        port = NODES[target_id]["port"]
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(1)
+                s.connect((host, port))
+                s.sendall(json.dumps(message).encode())
+                s.shutdown(socket.SHUT_WR)
+                response = b""
+                while True:
+                    chunk = s.recv(BUFFER_SIZE)
+                    if not chunk:
+                        break
+                    response += chunk
+                return json.loads(response.decode()) if response else None
+        except Exception:
+            return None
+
+    def start_election_socket(self):
+        """Start leader election using sockets."""
+        self.become_candidate()
+        votes = 1
+        majority = (len(self.peers) + 1) // 2 + 1
+        last_log_index = len(self.log) - 1
+        last_log_term = self.log[-1]["term"] if self.log else 0
+
+        for peer_id in self.peers:
+            response = self.send_message(peer_id, {
+                "type": "vote_request",
+                "from": self.id,
+                "term": self.current_term,
+                "last_log_index": last_log_index,
+                "last_log_term": last_log_term
+            })
+            if response:
+                if response.get("term", 0) > self.current_term:
+                    self.become_follower(response["term"])
+                    return False
+                if response.get("vote_granted"):
+                    votes += 1
+
+        if votes >= majority:
+            self.become_leader()
+            return True
+        return False
+
+    def handle_vote_request(self, message):
+        """Handle incoming vote request from a candidate."""
+        term = message.get("term", 0)
+        candidate_id = message.get("from")
+        last_log_index = message.get("last_log_index", -1)
+        last_log_term = message.get("last_log_term", 0)
+
+        if term < self.current_term:
+            return {"vote_granted": False, "term": self.current_term}
+
+        if term > self.current_term:
+            self.become_follower(term)
+
+        local_last_index = len(self.log) - 1
+        local_last_term = self.log[-1]["term"] if self.log else 0
+        up_to_date = (last_log_term > local_last_term) or \
+                     (last_log_term == local_last_term and last_log_index >= local_last_index)
+
+        if (self.voted_for is None or self.voted_for == candidate_id) and up_to_date:
+            self.voted_for = candidate_id
+            self.persist_state()
+            return {"vote_granted": True, "term": self.current_term}
+
+        return {"vote_granted": False, "term": self.current_term}
+
+    def handle_append_entries(self, message):
+        """Handle incoming heartbeat or log replication from leader."""
+        term = message.get("term", 0)
+        leader_id = message.get("leader_id")
+        entries = message.get("entries", [])
+        prev_log_index = message.get("prev_log_index", -1)
+        prev_log_term = message.get("prev_log_term", 0)
+        leader_commit = message.get("leader_commit", -1)
+
+        if term < self.current_term:
+            return {"success": False, "term": self.current_term}
+
+        if term > self.current_term:
+            self.become_follower(term, leader_id)
+
+        # reset election timer
+        self.last_heartbeat = time.time()
+        self.leader_id = leader_id
+
+        # log consistency check
+        if prev_log_index != -1:
+            if prev_log_index >= len(self.log):
+                return {"success": False, "term": self.current_term}
+            if self.log[prev_log_index].get("term") != prev_log_term:
+                return {"success": False, "term": self.current_term}
+
+        # append new entries
+        if entries:
+            insert_at = prev_log_index + 1
+            self.log = self.log[:insert_at] + entries
+            self.persist_state()
+
+        # update commit index
+        if leader_commit > self.commit_index:
+            self.commit_index = min(leader_commit, len(self.log) - 1)
+
+        return {"success": True, "term": self.current_term}
+
+    def send_heartbeats_socket(self):
+        """Send heartbeats to all peers via sockets."""
+        if self.state != Role.LEADER:
+            return
+        for peer_id in self.peers:
+            prev_log_index = self.next_index.get(peer_id, len(self.log)) - 1
+            prev_log_term = self.log[prev_log_index]["term"] if prev_log_index >= 0 and prev_log_index < len(self.log) else 0
+            entries = self.log[self.next_index.get(peer_id, len(self.log)):]
+
+            response = self.send_message(peer_id, {
+                "type": "append_entries",
+                "term": self.current_term,
+                "leader_id": self.id,
+                "prev_log_index": prev_log_index,
+                "prev_log_term": prev_log_term,
+                "entries": entries,
+                "leader_commit": self.commit_index
+            })
+
+            if response:
+                if response.get("term", 0) > self.current_term:
+                    self.become_follower(response["term"])
+                    return
+                if response.get("success"):
+                    matched = prev_log_index + len(entries)
+                    self.match_index[peer_id] = matched
+                    self.next_index[peer_id] = matched + 1
+                else:
+                    self.next_index[peer_id] = max(0, self.next_index.get(peer_id, 1) - 1)
+
+    def start_raft_loop(self):
+        """Background thread — checks election timeout and sends heartbeats."""
+        def _loop():
+            while True:
+                if self.state == Role.LEADER:
+                    self.send_heartbeats_socket()
+                    time.sleep(HEARTBEAT_INTERVAL)
+                else:
+                    elapsed = time.time() - self.last_heartbeat
+                    if elapsed >= self.election_timeout_sec:
+                        print(f"[{self.id}] Election timeout — starting election")
+                        self.start_election_socket()
+                    time.sleep(0.05)
+
+        threading.Thread(target=_loop, daemon=True).start()
+        print(f"[{self.id}] Raft loop started")
