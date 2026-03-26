@@ -4,20 +4,20 @@ import json
 import os
 import time
 import random
+from pathlib import Path
 import socket
 import threading
 from config import NODES, BUFFER_SIZE
-from pathlib import Path
 
-# ADD ELECTION_TIMEOUT constants
-ELECTION_TIMEOUT_MIN = 0.5
-ELECTION_TIMEOUT_MAX = 1.0
-HEARTBEAT_INTERVAL = 0.1
 
 class Role(Enum):
     FOLLOWER = "Follower"
     CANDIDATE = "Candidate"
     LEADER = "Leader"
+
+
+# Raft timing constants
+HEARTBEAT_INTERVAL = 0.05  # leader sends heartbeats every 50ms
 
 
 class Node:
@@ -30,6 +30,7 @@ class Node:
 
     def __init__(self, node_id: str, peers: Optional[List[str]] = None, state_dir: Optional[Union[str, Path]] = None):
         self.id = node_id
+        self.node_id = node_id  # alias for integration with other modules
         self.peers: List[str] = peers or []
 
         # Where to store persistent state files. If None, persistence is disabled
@@ -71,6 +72,16 @@ class Node:
         self.base_election_timeout_ms: int = 150
         self.election_timeout_sec: float = self._random_election_timeout()
 
+        # Socket communication setup — uses port+1000 for raft RPCs
+        # so node1=6001, node2=6002, node3=6003 (avoids conflict with main ports)
+        self.host = NODES[node_id]["host"]
+        self.port = NODES[node_id]["port"] + 1000
+        self.peers_map = {nid: info for nid, info in NODES.items() if nid != node_id}
+        # populate peers list from config if not provided
+        if not self.peers:
+            self.peers = list(self.peers_map.keys())
+        self.is_alive = True
+
         # Load persisted state if present and persistence enabled
         if self.state_dir is not None:
             self.load_state()
@@ -79,6 +90,10 @@ class Node:
         self.state = Role.FOLLOWER
         self.current_term = term
         self.voted_for = None
+        self.leader_id = leader_id
+        self.last_heartbeat = time.time()
+        self.election_timeout_sec = self._random_election_timeout()
+        print(f"[{self.node_id}] Became FOLLOWER (term {term})")
 
     # --- Persistence helpers ---
     def _state_file(self) -> Path:
@@ -135,6 +150,7 @@ class Node:
 
         # When becoming candidate, reset election timer to avoid immediate re-election
         self.reset_election_timer()
+        print(f"[{self.node_id}] Became CANDIDATE (term {self.current_term})")
 
     def _random_election_timeout(self) -> float:
         return random.uniform(self.base_election_timeout_ms, 2 * self.base_election_timeout_ms) / 1000.0
@@ -157,7 +173,7 @@ class Node:
 
     def become_leader(self) -> None:
         self.state = Role.LEADER
-        self.leader_id = self.id
+        self.leader_id = self.node_id
         last_log_index = len(self.log) - 1
         for p in self.peers:
             # per Raft, leader initializes nextIndex to lastLogIndex+1
@@ -165,6 +181,7 @@ class Node:
             self.match_index[p] = -1
         # Heartbeat interval in milliseconds (leader sends AppendEntries at this rate)
         self.heartbeat_interval_ms: int = 50
+        print(f"[{self.node_id}] Became LEADER (term {self.current_term})")
 
     def send_heartbeats(self, peers_map: Dict[str, 'Node']) -> None:
         """Send AppendEntries (heartbeats) to all peers. This method performs
@@ -351,6 +368,7 @@ class Node:
                 self.persist_state()
             except Exception:
                 pass
+            print(f"[{self.node_id}] Voted for {candidate_id} in term {candidate_term}")
             return {"voteGranted": True, "term": self.current_term}
 
         return {"voteGranted": False, "term": self.current_term}
@@ -439,10 +457,85 @@ class Node:
 
         return False
 
-    def send_message(self, target_id, message):
-        """Send a message to another node via socket."""
-        host = NODES[target_id]["host"]
-        port = NODES[target_id]["port"]
+    # ─────────────────────────────────────────
+    # SOCKET COMMUNICATION
+    # Added for integration with the distributed file storage system
+    # Uses port+1000 for Raft RPCs to avoid conflicts with main node ports
+    # ─────────────────────────────────────────
+
+    def start(self):
+        """Start the Raft node with socket-based communication.
+        Launches 2 background threads:
+        1. Listen for incoming Raft RPCs
+        2. Run election timer (followers check timeout, leaders send heartbeats)
+        """
+        threading.Thread(target=self._listen, daemon=True).start()
+        threading.Thread(target=self._run_election_timer, daemon=True).start()
+        print(f"[{self.node_id}] Raft started on port {self.port}")
+
+    def _listen(self):
+        """Listen for incoming Raft RPC messages on port+1000."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind((self.host, self.port))
+            s.listen(10)
+            while self.is_alive:
+                try:
+                    conn, _ = s.accept()
+                    threading.Thread(
+                        target=self._handle_rpc,
+                        args=(conn,),
+                        daemon=True
+                    ).start()
+                except Exception as e:
+                    if self.is_alive:
+                        print(f"[{self.node_id}] Raft listen error: {e}")
+
+    def _handle_rpc(self, conn):
+        """Handle incoming Raft RPC — routes to on_request_vote or on_append_entries."""
+        try:
+            data = b""
+            while True:
+                chunk = conn.recv(BUFFER_SIZE)
+                if not chunk:
+                    break
+                data += chunk
+            if data:
+                message = json.loads(data.decode())
+                msg_type = message.get("type")
+
+                if msg_type == "request_vote":
+                    # route to original on_request_vote handler
+                    response = self.on_request_vote(
+                        candidate_id=message.get("candidate_id"),
+                        candidate_term=message.get("term", 0),
+                        last_log_index=message.get("last_log_index", -1),
+                        last_log_term=message.get("last_log_term", 0)
+                    )
+                elif msg_type == "append_entries":
+                    # route to original on_append_entries handler
+                    response = self.on_append_entries(
+                        leader_id=message.get("leader_id"),
+                        leader_term=message.get("term", 0),
+                        prev_log_index=message.get("prev_log_index", -1),
+                        prev_log_term=message.get("prev_log_term", 0),
+                        entries=message.get("entries", []),
+                        leader_commit=message.get("leader_commit", -1)
+                    )
+                else:
+                    response = {"status": "error", "message": "unknown type"}
+
+                conn.sendall(json.dumps(response).encode())
+                conn.shutdown(socket.SHUT_WR)
+        except Exception as e:
+            print(f"[{self.node_id}] Raft RPC error: {e}")
+        finally:
+            conn.close()
+
+    def _send_rpc(self, target_id, message):
+        """Send a Raft RPC to another node over socket and return the response."""
+        host = self.peers_map[target_id]["host"]
+        port = self.peers_map[target_id]["port"] + 1000
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.settimeout(1)
@@ -459,110 +552,81 @@ class Node:
         except Exception:
             return None
 
-    def start_election_socket(self):
-        """Start leader election using sockets."""
+    def _run_election_timer(self):
+        """
+        Election timer loop — runs continuously in background:
+        - Followers and candidates check if election timeout has elapsed
+        - If timeout fires, start a new socket-based election
+        - Leaders send heartbeats every 50ms to maintain leadership
+        """
+        while self.is_alive:
+            time.sleep(0.01)  # check every 10ms
+
+            if self.state == Role.LEADER:
+                self._send_heartbeats_socket()
+                time.sleep(HEARTBEAT_INTERVAL)
+            else:
+                elapsed = time.time() - self.last_heartbeat
+                if elapsed >= self.election_timeout_sec:
+                    print(f"[{self.node_id}] Election timeout — starting election")
+                    self._start_election_socket()
+
+    def _start_election_socket(self):
+        """Start a new election using socket RPCs.
+        Becomes candidate, requests votes from all peers over sockets.
+        If majority votes received, becomes leader.
+        """
         self.become_candidate()
-        votes = 1
-        majority = (len(self.peers) + 1) // 2 + 1
+        term = self.current_term
         last_log_index = len(self.log) - 1
         last_log_term = self.log[-1]["term"] if self.log else 0
 
-        for peer_id in self.peers:
-            response = self.send_message(peer_id, {
-                "type": "vote_request",
-                "from": self.id,
-                "term": self.current_term,
+        votes = 1  # vote for self
+        total = len(self.peers) + 1
+        majority = total // 2 + 1
+
+        for peer_id in list(self.peers_map.keys()):
+            response = self._send_rpc(peer_id, {
+                "type": "request_vote",
+                "term": term,
+                "candidate_id": self.node_id,
                 "last_log_index": last_log_index,
                 "last_log_term": last_log_term
             })
+
             if response:
+                # If peer has higher term, step down immediately
                 if response.get("term", 0) > self.current_term:
                     self.become_follower(response["term"])
-                    return False
-                if response.get("vote_granted"):
+                    return
+                if response.get("voteGranted"):
                     votes += 1
 
-        if votes >= majority:
+        if self.state == Role.CANDIDATE and votes >= majority:
             self.become_leader()
-            return True
-        return False
+        elif self.state == Role.CANDIDATE:
+            # failed election - go back to follower and wait for next timeout
+            self.state = Role.FOLLOWER
+            self.last_heartbeat = time.time()
 
-    def handle_vote_request(self, message):
-        """Handle incoming vote request from a candidate."""
-        term = message.get("term", 0)
-        candidate_id = message.get("from")
-        last_log_index = message.get("last_log_index", -1)
-        last_log_term = message.get("last_log_term", 0)
-
-        if term < self.current_term:
-            return {"vote_granted": False, "term": self.current_term}
-
-        if term > self.current_term:
-            self.become_follower(term)
-
-        local_last_index = len(self.log) - 1
-        local_last_term = self.log[-1]["term"] if self.log else 0
-        up_to_date = (last_log_term > local_last_term) or \
-                     (last_log_term == local_last_term and last_log_index >= local_last_index)
-
-        if (self.voted_for is None or self.voted_for == candidate_id) and up_to_date:
-            self.voted_for = candidate_id
-            self.persist_state()
-            return {"vote_granted": True, "term": self.current_term}
-
-        return {"vote_granted": False, "term": self.current_term}
-
-    def handle_append_entries(self, message):
-        """Handle incoming heartbeat or log replication from leader."""
-        term = message.get("term", 0)
-        leader_id = message.get("leader_id")
-        entries = message.get("entries", [])
-        prev_log_index = message.get("prev_log_index", -1)
-        prev_log_term = message.get("prev_log_term", 0)
-        leader_commit = message.get("leader_commit", -1)
-
-        if term < self.current_term:
-            return {"success": False, "term": self.current_term}
-
-        if term > self.current_term:
-            self.become_follower(term, leader_id)
-
-        # reset election timer
-        self.last_heartbeat = time.time()
-        self.leader_id = leader_id
-
-        # log consistency check
-        if prev_log_index != -1:
-            if prev_log_index >= len(self.log):
-                return {"success": False, "term": self.current_term}
-            if self.log[prev_log_index].get("term") != prev_log_term:
-                return {"success": False, "term": self.current_term}
-
-        # append new entries
-        if entries:
-            insert_at = prev_log_index + 1
-            self.log = self.log[:insert_at] + entries
-            self.persist_state()
-
-        # update commit index
-        if leader_commit > self.commit_index:
-            self.commit_index = min(leader_commit, len(self.log) - 1)
-
-        return {"success": True, "term": self.current_term}
-
-    def send_heartbeats_socket(self):
-        """Send heartbeats to all peers via sockets."""
+    def _send_heartbeats_socket(self):
+        """Leader sends AppendEntries heartbeats to all peers over sockets.
+        Also handles log replication — sends any uncommitted entries.
+        Steps down if a peer reports a higher term.
+        """
         if self.state != Role.LEADER:
             return
-        for peer_id in self.peers:
-            prev_log_index = self.next_index.get(peer_id, len(self.log)) - 1
-            prev_log_term = self.log[prev_log_index]["term"] if prev_log_index >= 0 and prev_log_index < len(self.log) else 0
-            entries = self.log[self.next_index.get(peer_id, len(self.log)):]
 
-            response = self.send_message(peer_id, {
+        for peer_id in list(self.peers_map.keys()):
+            next_idx = self.next_index.get(peer_id, len(self.log))
+            prev_log_index = next_idx - 1
+            prev_log_term = self.log[prev_log_index]["term"] if 0 <= prev_log_index < len(self.log) else 0
+            entries = self.log[next_idx:]
+
+            response = self._send_rpc(peer_id, {
                 "type": "append_entries",
                 "term": self.current_term,
-                "leader_id": self.id,
+                "leader_id": self.node_id,
                 "prev_log_index": prev_log_index,
                 "prev_log_term": prev_log_term,
                 "entries": entries,
@@ -570,29 +634,85 @@ class Node:
             })
 
             if response:
+                # If peer reports higher term, step down
                 if response.get("term", 0) > self.current_term:
                     self.become_follower(response["term"])
                     return
                 if response.get("success"):
+                    # update match_index and next_index
                     matched = prev_log_index + len(entries)
                     self.match_index[peer_id] = matched
                     self.next_index[peer_id] = matched + 1
                 else:
+                    # on failure, decrement next_index to retry next time
                     self.next_index[peer_id] = max(0, self.next_index.get(peer_id, 1) - 1)
 
-    def start_raft_loop(self):
-        """Background thread — checks election timeout and sends heartbeats."""
-        def _loop():
-            while True:
-                if self.state == Role.LEADER:
-                    self.send_heartbeats_socket()
-                    time.sleep(HEARTBEAT_INTERVAL)
-                else:
-                    elapsed = time.time() - self.last_heartbeat
-                    if elapsed >= self.election_timeout_sec:
-                        print(f"[{self.id}] Election timeout — starting election")
-                        self.start_election_socket()
-                    time.sleep(0.05)
+    def append_command(self, command: dict) -> bool:
+        """Leader appends a command to the log and replicates to majority.
+        Used by server.py when handling client file uploads.
+        Returns True if committed successfully, False otherwise.
+        """
+        if self.state != Role.LEADER:
+            return False
 
-        threading.Thread(target=_loop, daemon=True).start()
-        print(f"[{self.id}] Raft loop started")
+        # Append to local log
+        entry = {"term": self.current_term, **command}
+        self.log.append(entry)
+        idx = len(self.log) - 1
+        try:
+            self.persist_state()
+        except Exception:
+            pass
+
+        total = len(self.peers) + 1
+        majority = total // 2 + 1
+
+        # try to replicate to majority
+        for _ in range(10):
+            self._send_heartbeats_socket()
+            replicated = 1
+            for peer_id in self.peers:
+                if self.match_index.get(peer_id, -1) >= idx:
+                    replicated += 1
+            if replicated >= majority:
+                # commit and apply
+                self.commit_index = max(self.commit_index, idx)
+                self.last_applied = self.commit_index
+                print(f"[{self.node_id}] Command committed at index {idx}")
+                return True
+            time.sleep(0.05)
+
+        return False
+
+    def is_leader(self) -> bool:
+        """Return True if this node is the current Raft leader."""
+        return self.state == Role.LEADER
+
+    def get_leader_id(self) -> Optional[str]:
+        """Return the current known leader id."""
+        return self.leader_id
+
+    def get_status(self) -> dict:
+        """Return current Raft status — used by server.py for diagnostics."""
+        return {
+            "node_id": self.node_id,
+            "role": self.state.value,
+            "term": self.current_term,
+            "leader_id": self.leader_id,
+            "log_length": len(self.log),
+            "commit_index": self.commit_index
+        }
+
+
+if __name__ == "__main__":
+    import sys
+    node = Node(sys.argv[1])
+    node.start()
+    print(f"[{node.node_id}] Raft node running...")
+    try:
+        while True:
+            time.sleep(2)
+            print(node.get_status())
+    except KeyboardInterrupt:
+        node.is_alive = False
+        print(f"[{node.node_id}] Shutting down.")
