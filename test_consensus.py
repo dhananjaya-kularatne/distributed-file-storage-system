@@ -144,3 +144,44 @@ def test_send_heartbeats_replication_round():
     assert leader.match_index["f2"] == 2
     assert leader.next_index["f1"] == 3
     assert leader.next_index["f2"] == 3
+
+
+def test_leader_replicate_and_commit_majority():
+    leader = Node("L", peers=["A", "B"]) 
+    leader.current_term = 2
+    leader.log = [{"term": 1, "cmd": "x"}]
+
+    a = Node("A", peers=["L", "B"])
+    b = Node("B", peers=["L", "A"])
+    # followers have prefix so replication should succeed
+    a.log = leader.log.copy()
+    b.log = leader.log.copy()
+
+    peers = {"L": leader, "A": a, "B": b}
+
+    leader.become_leader()
+    committed = leader.replicate_entry(peers, {"cmd": "new"})
+    assert committed is True
+    # leader commit index should point to new entry
+    assert leader.commit_index == len(leader.log) - 1
+    assert leader.last_applied == leader.commit_index
+
+
+def test_conflict_handling_decrements_next_index():
+    leader = Node("L2", peers=["F"])
+    leader.current_term = 3
+    # leader has two entries already
+    leader.log = [{"term": 1, "cmd": "a"}, {"term": 2, "cmd": "b"}]
+
+    # follower is missing the second entry (shorter log)
+    f = Node("F", peers=["L2"])
+    f.log = [{"term": 1, "cmd": "a"}]
+
+    peers = {"L2": leader, "F": f}
+
+    leader.become_leader()
+    # append new entry and attempt to replicate
+    res = leader.replicate_entry(peers, {"cmd": "c"}, max_rounds=5)
+    # replication should succeed (after leader decrements next_index and retries)
+    assert res is True
+    assert f.log[-1]["cmd"] == "c"

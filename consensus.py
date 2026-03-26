@@ -25,13 +25,15 @@ class Node:
         self.id = node_id
         self.peers: List[str] = peers or []
 
-        # Where to store persistent state files
-        self.state_dir: Path = Path(state_dir) if state_dir is not None else Path(".")
-        try:
-            self.state_dir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            # best-effort; tests may run in directories without explicit perms
-            pass
+        # Where to store persistent state files. If None, persistence is disabled
+        # (useful for tests that don't want global files).
+        self.state_dir: Optional[Path] = Path(state_dir) if state_dir is not None else None
+        if self.state_dir is not None:
+            try:
+                self.state_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                # best-effort; tests may run in directories without explicit perms
+                pass
 
         # Persistent state on all servers
         self.current_term: int = 0
@@ -58,8 +60,9 @@ class Node:
         self.base_election_timeout_ms: int = 150
         self.election_timeout_sec: float = self._random_election_timeout()
 
-        # Load persisted state if present
-        self.load_state()
+        # Load persisted state if present and persistence enabled
+        if self.state_dir is not None:
+            self.load_state()
 
     def become_follower(self, term: int, leader_id: Optional[str] = None) -> None:
         self.state = Role.FOLLOWER
@@ -68,10 +71,15 @@ class Node:
 
     # --- Persistence helpers ---
     def _state_file(self) -> Path:
+        if self.state_dir is None:
+            raise RuntimeError("persistence disabled for this node (state_dir=None)")
         return self.state_dir / f"raft_state_{self.id}.json"
 
     def persist_state(self) -> None:
         """Persist `current_term`, `voted_for`, and `log` atomically to disk."""
+        if self.state_dir is None:
+            # persistence disabled; no-op
+            return
         data = {
             "current_term": self.current_term,
             "voted_for": self.voted_for,
@@ -88,6 +96,8 @@ class Node:
 
     def load_state(self) -> None:
         """Load persisted state if available. If file missing, do nothing."""
+        if self.state_dir is None:
+            return
         target = self._state_file()
         if not target.exists():
             return
@@ -180,6 +190,45 @@ class Node:
             else:
                 # on failure, decrement next_index to retry next time
                 self.next_index[p] = max(0, self.next_index.get(p, 1) - 1)
+
+    def replicate_entry(self, peers_map: Dict[str, 'Node'], command: dict, max_rounds: int = 10) -> bool:
+        """Leader appends a client write and tries to replicate until committed by majority.
+
+        Returns True if committed, False otherwise.
+        This is a synchronous helper for tests/simulations.
+        """
+        if self.state != Role.LEADER:
+            return False
+
+        # Append to local log
+        entry = {"term": self.current_term, **command}
+        self.log.append(entry)
+        idx = len(self.log) - 1
+
+        total = len(self.peers) + 1
+        majority = total // 2 + 1
+
+        rounds = 0
+        while rounds < max_rounds:
+            rounds += 1
+            # send one round of AppendEntries to followers
+            self.send_heartbeats(peers_map)
+
+            # count nodes (including leader) that have replicated idx
+            replicated = 1 if idx < len(self.log) else 0
+            for p in self.peers:
+                if self.match_index.get(p, -1) >= idx:
+                    replicated += 1
+
+            if replicated >= majority:
+                # commit and apply
+                self.commit_index = max(self.commit_index, idx)
+                # apply entries up to commit_index
+                while self.last_applied < self.commit_index:
+                    self.last_applied += 1
+                return True
+
+        return False
 
     def __repr__(self) -> str:
         return f"<Node id={self.id} role={self.state.value} term={self.current_term} peers={len(self.peers)}>"
