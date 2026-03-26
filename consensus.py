@@ -17,15 +17,14 @@ class Role(Enum):
 
 
 # Raft timing constants
-HEARTBEAT_INTERVAL = 0.05  # leader sends heartbeats every 50ms
+HEARTBEAT_INTERVAL = 0.5  # leader sends heartbeats every 500ms
 
 
 class Node:
-    """Minimal Raft node skeleton for bootstrapping consensus logic.
+    """Raft consensus node using socket-based communication.
 
-    This file intentionally contains only the smallest set of fields and
-    state-transition helpers needed to proceed with implementing elections
-    and replication in later steps.
+    Implements leader election, log replication, and crash recovery
+    using socket RPCs on port+1000 (node1=6001, node2=6002, node3=6003).
     """
 
     def __init__(self, node_id: str, peers: Optional[List[str]] = None, state_dir: Optional[Union[str, Path]] = None):
@@ -64,12 +63,13 @@ class Node:
         self.state: Role = Role.FOLLOWER
 
         # Leader tracking and heartbeat timestamp (for follower election timers)
+        # initialized to time.time() so nodes don't immediately time out on startup
         self.leader_id: Optional[str] = None
-        self.last_heartbeat: float = 0.0
+        self.last_heartbeat: float = time.time()
 
         # Election timeout base in milliseconds. Election timeout is randomized
         # per Raft to a value in [base, 2*base] ms. Tests can override base.
-        self.base_election_timeout_ms: int = 150
+        self.base_election_timeout_ms: int = 5000
         self.election_timeout_sec: float = self._random_election_timeout()
 
         # Socket communication setup — uses port+1000 for raft RPCs
@@ -86,6 +86,10 @@ class Node:
         if self.state_dir is not None:
             self.load_state()
 
+    # ─────────────────────────────────────────
+    # ROLE TRANSITIONS
+    # ─────────────────────────────────────────
+
     def become_follower(self, term: int, leader_id: Optional[str] = None) -> None:
         self.state = Role.FOLLOWER
         self.current_term = term
@@ -95,7 +99,53 @@ class Node:
         self.election_timeout_sec = self._random_election_timeout()
         print(f"[{self.node_id}] Became FOLLOWER (term {term})")
 
-    # --- Persistence helpers ---
+    def become_candidate(self) -> None:
+        self.state = Role.CANDIDATE
+        self.current_term += 1
+        self.voted_for = self.id
+        # When becoming candidate, reset election timer to avoid immediate re-election
+        self.reset_election_timer()
+        print(f"[{self.node_id}] Became CANDIDATE (term {self.current_term})")
+
+    def become_leader(self) -> None:
+        self.state = Role.LEADER
+        self.leader_id = self.node_id
+        last_log_index = len(self.log) - 1
+        for p in self.peers:
+            # per Raft, leader initializes nextIndex to lastLogIndex+1
+            self.next_index[p] = last_log_index + 1
+            self.match_index[p] = -1
+        # Heartbeat interval in milliseconds (leader sends AppendEntries at this rate)
+        self.heartbeat_interval_ms: int = 50
+        print(f"[{self.node_id}] Became LEADER (term {self.current_term})")
+
+    # ─────────────────────────────────────────
+    # ELECTION TIMER HELPERS
+    # ─────────────────────────────────────────
+
+    def _random_election_timeout(self) -> float:
+        return random.uniform(self.base_election_timeout_ms, 2 * self.base_election_timeout_ms) / 1000.0
+
+    def reset_election_timer(self) -> None:
+        """Reset the election timer (set new randomized timeout and update last heartbeat time)."""
+        self.election_timeout_sec = self._random_election_timeout()
+        self.last_heartbeat = time.time()
+
+    def check_election_timeout(self, now: Optional[float] = None) -> bool:
+        """Check whether the election timeout has elapsed. If so, transition to Candidate and return True."""
+        if now is None:
+            now = time.time()
+        elapsed = now - self.last_heartbeat
+        if elapsed >= self.election_timeout_sec:
+            # no heartbeat in timeout window -> become candidate
+            self.become_candidate()
+            return True
+        return False
+
+    # ─────────────────────────────────────────
+    # PERSISTENCE
+    # ─────────────────────────────────────────
+
     def _state_file(self) -> Path:
         if self.state_dir is None:
             raise RuntimeError("persistence disabled for this node (state_dir=None)")
@@ -132,7 +182,6 @@ class Node:
         try:
             with target.open("r", encoding="utf-8") as f:
                 data = json.load(f)
-
             self.current_term = int(data.get("current_term", self.current_term))
             vf = data.get("voted_for")
             self.voted_for = vf if vf is None or isinstance(vf, str) else None
@@ -143,142 +192,9 @@ class Node:
             # If corrupted, ignore and start fresh (higher-level code may handle recovery)
             return
 
-    def become_candidate(self) -> None:
-        self.state = Role.CANDIDATE
-        self.current_term += 1
-        self.voted_for = self.id
-
-        # When becoming candidate, reset election timer to avoid immediate re-election
-        self.reset_election_timer()
-        print(f"[{self.node_id}] Became CANDIDATE (term {self.current_term})")
-
-    def _random_election_timeout(self) -> float:
-        return random.uniform(self.base_election_timeout_ms, 2 * self.base_election_timeout_ms) / 1000.0
-
-    def reset_election_timer(self) -> None:
-        """Reset the election timer (set new randomized timeout and update last heartbeat time)."""
-        self.election_timeout_sec = self._random_election_timeout()
-        self.last_heartbeat = time.time()
-
-    def check_election_timeout(self, now: Optional[float] = None) -> bool:
-        """Check whether the election timeout has elapsed. If so, transition to Candidate and return True."""
-        if now is None:
-            now = time.time()
-        elapsed = now - self.last_heartbeat
-        if elapsed >= self.election_timeout_sec:
-            # no heartbeat in timeout window -> become candidate
-            self.become_candidate()
-            return True
-        return False
-
-    def become_leader(self) -> None:
-        self.state = Role.LEADER
-        self.leader_id = self.node_id
-        last_log_index = len(self.log) - 1
-        for p in self.peers:
-            # per Raft, leader initializes nextIndex to lastLogIndex+1
-            self.next_index[p] = last_log_index + 1
-            self.match_index[p] = -1
-        # Heartbeat interval in milliseconds (leader sends AppendEntries at this rate)
-        self.heartbeat_interval_ms: int = 50
-        print(f"[{self.node_id}] Became LEADER (term {self.current_term})")
-
-    def send_heartbeats(self, peers_map: Dict[str, 'Node']) -> None:
-        """Send AppendEntries (heartbeats) to all peers. This method performs
-        one round of heartbeats/replication; it does not start a background
-        thread. `peers_map` maps peer id -> Node instance.
-        """
-        if self.state != Role.LEADER:
-            return
-
-        for p in self.peers:
-            peer = peers_map.get(p)
-            if peer is None:
-                continue
-
-            next_idx = self.next_index.get(p, len(self.log))
-            if next_idx <= self.last_snapshot_index:
-                # Send InstallSnapshot instead
-                resp = peer.on_install_snapshot(
-                    leader_id=self.id,
-                    leader_term=self.current_term,
-                    last_included_index=self.last_snapshot_index,
-                    last_included_term=self.last_snapshot_term,
-                    data={},  # snapshot data
-                )
-                if resp.get("term", 0) > self.current_term:
-                    self.become_follower(resp["term"])
-                    return
-                # After snapshot, set next_index to last_snapshot_index + 1
-                self.next_index[p] = self.last_snapshot_index + 1
-                self.match_index[p] = self.last_snapshot_index
-                continue
-
-            prev_log_index = next_idx - 1
-            prev_log_term = self.log[prev_log_index]["term"] if prev_log_index >= 0 and prev_log_index < len(self.log) else 0
-            entries = self.log[next_idx:]
-
-            resp = peer.on_append_entries(
-                leader_id=self.id,
-                leader_term=self.current_term,
-                prev_log_index=prev_log_index,
-                prev_log_term=prev_log_term,
-                entries=entries,
-                leader_commit=self.commit_index,
-            )
-
-            # If peer reports higher term, step down
-            if resp.get("term", 0) > self.current_term:
-                self.become_follower(resp["term"])
-                return
-
-            if resp.get("success"):
-                # update match_index and next_index
-                matched = prev_log_index + len(entries)
-                self.match_index[p] = matched
-                self.next_index[p] = matched + 1
-            else:
-                # on failure, decrement next_index to retry next time
-                self.next_index[p] = max(0, self.next_index.get(p, 1) - 1)
-
-    def replicate_entry(self, peers_map: Dict[str, 'Node'], command: dict, max_rounds: int = 10) -> bool:
-        """Leader appends a client write and tries to replicate until committed by majority.
-
-        Returns True if committed, False otherwise.
-        This is a synchronous helper for tests/simulations.
-        """
-        if self.state != Role.LEADER:
-            return False
-
-        # Append to local log
-        entry = {"term": self.current_term, **command}
-        self.log.append(entry)
-        idx = len(self.log) - 1
-
-        total = len(self.peers) + 1
-        majority = total // 2 + 1
-
-        rounds = 0
-        while rounds < max_rounds:
-            rounds += 1
-            # send one round of AppendEntries to followers
-            self.send_heartbeats(peers_map)
-
-            # count nodes (including leader) that have replicated idx
-            replicated = 1 if idx < len(self.log) else 0
-            for p in self.peers:
-                if self.match_index.get(p, -1) >= idx:
-                    replicated += 1
-
-            if replicated >= majority:
-                # commit and apply
-                self.commit_index = max(self.commit_index, idx)
-                # apply entries up to commit_index
-                while self.last_applied < self.commit_index:
-                    self.last_applied += 1
-                return True
-
-        return False
+    # ─────────────────────────────────────────
+    # SNAPSHOT
+    # ─────────────────────────────────────────
 
     def create_snapshot(self, snapshot_index: int) -> None:
         """Create a snapshot up to the given index, compacting the log."""
@@ -300,40 +216,13 @@ class Node:
         except Exception:
             pass
 
-    def on_install_snapshot(self, leader_id: str, leader_term: int, last_included_index: int, last_included_term: int, data: dict) -> dict:
-        """Handle InstallSnapshot RPC to install a snapshot from leader."""
-        if leader_term < self.current_term:
-            return {"term": self.current_term}
-
-        if leader_term > self.current_term:
-            self.become_follower(leader_term, leader_id)
-            try:
-                self.persist_state()
-            except Exception:
-                pass
-
-        # Install the snapshot
-        self.last_snapshot_index = last_included_index
-        self.last_snapshot_term = last_included_term
-        # Discard log entries up to last_included_index
-        self.log = [e for e in self.log if e.get("index", -1) > last_included_index]
-        # Reset commit_index and last_applied
-        self.commit_index = max(self.commit_index, last_included_index)
-        self.last_applied = max(self.last_applied, last_included_index)
-        # Apply snapshot data (e.g., restore state machine)
-        # For simplicity, assume data is empty or handled elsewhere
-
-        try:
-            self.persist_state()
-        except Exception:
-            pass
-
-        return {"term": self.current_term}
-
     def __repr__(self) -> str:
         return f"<Node id={self.id} role={self.state.value} term={self.current_term} peers={len(self.peers)}>"
 
-    # --- RequestVote RPC handler ---
+    # ─────────────────────────────────────────
+    # RPC HANDLERS
+    # ─────────────────────────────────────────
+
     def on_request_vote(self, candidate_id: str, candidate_term: int, last_log_index: int = -1, last_log_term: int = 0):
         """Handle an incoming RequestVote RPC from a candidate.
 
@@ -419,47 +308,37 @@ class Node:
 
         return {"success": True, "term": self.current_term}
 
-    # --- Candidate behavior: start election ---
-    def start_election(self, peers_map: Dict[str, 'Node']) -> bool:
-        """Begin election: become candidate, solicit votes from peers_map.
+    def on_install_snapshot(self, leader_id: str, leader_term: int, last_included_index: int, last_included_term: int, data: dict) -> dict:
+        """Handle InstallSnapshot RPC to install a snapshot from leader."""
+        if leader_term < self.current_term:
+            return {"term": self.current_term}
 
-        peers_map maps peer id -> Node instance. Returns True if elected leader.
-        """
-        self.become_candidate()
+        if leader_term > self.current_term:
+            self.become_follower(leader_term, leader_id)
+            try:
+                self.persist_state()
+            except Exception:
+                pass
 
-        votes = 1  # vote for self
-        total = len(self.peers) + 1
-        majority = total // 2 + 1
+        # Install the snapshot
+        self.last_snapshot_index = last_included_index
+        self.last_snapshot_term = last_included_term
+        # Discard log entries up to last_included_index
+        self.log = [e for e in self.log if e.get("index", -1) > last_included_index]
+        # Reset commit_index and last_applied
+        self.commit_index = max(self.commit_index, last_included_index)
+        self.last_applied = max(self.last_applied, last_included_index)
+        # Apply snapshot data (e.g., restore state machine)
+        # For simplicity, assume data is empty or handled elsewhere
+        try:
+            self.persist_state()
+        except Exception:
+            pass
 
-        for p in self.peers:
-            peer = peers_map.get(p)
-            if peer is None:
-                continue
-
-            resp = peer.on_request_vote(
-                candidate_id=self.id,
-                candidate_term=self.current_term,
-                last_log_index=len(self.log) - 1,
-                last_log_term=self.log[-1]["term"] if self.log else 0,
-            )
-
-            # If peer has higher term, step down
-            if resp.get("term", 0) > self.current_term:
-                self.become_follower(resp["term"])
-                return False
-
-            if resp.get("voteGranted"):
-                votes += 1
-
-        if votes >= majority:
-            self.become_leader()
-            return True
-
-        return False
+        return {"term": self.current_term}
 
     # ─────────────────────────────────────────
     # SOCKET COMMUNICATION
-    # Added for integration with the distributed file storage system
     # Uses port+1000 for Raft RPCs to avoid conflicts with main node ports
     # ─────────────────────────────────────────
 
@@ -505,7 +384,7 @@ class Node:
                 msg_type = message.get("type")
 
                 if msg_type == "request_vote":
-                    # route to original on_request_vote handler
+                    # route to on_request_vote handler
                     response = self.on_request_vote(
                         candidate_id=message.get("candidate_id"),
                         candidate_term=message.get("term", 0),
@@ -513,7 +392,7 @@ class Node:
                         last_log_term=message.get("last_log_term", 0)
                     )
                 elif msg_type == "append_entries":
-                    # route to original on_append_entries handler
+                    # route to on_append_entries handler
                     response = self.on_append_entries(
                         leader_id=message.get("leader_id"),
                         leader_term=message.get("term", 0),
@@ -557,15 +436,14 @@ class Node:
         Election timer loop — runs continuously in background:
         - Followers and candidates check if election timeout has elapsed
         - If timeout fires, start a new socket-based election
-        - Leaders send heartbeats every 50ms to maintain leadership
+        - Leaders send heartbeats every 500ms to maintain leadership
         """
         while self.is_alive:
-            time.sleep(0.01)  # check every 10ms
-
             if self.state == Role.LEADER:
                 self._send_heartbeats_socket()
                 time.sleep(HEARTBEAT_INTERVAL)
             else:
+                time.sleep(0.5)  # check every 500ms
                 elapsed = time.time() - self.last_heartbeat
                 if elapsed >= self.election_timeout_sec:
                     print(f"[{self.node_id}] Election timeout — starting election")
@@ -683,6 +561,10 @@ class Node:
             time.sleep(0.05)
 
         return False
+
+    # ─────────────────────────────────────────
+    # PUBLIC HELPERS FOR server.py
+    # ─────────────────────────────────────────
 
     def is_leader(self) -> bool:
         """Return True if this node is the current Raft leader."""
