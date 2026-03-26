@@ -48,6 +48,10 @@ class Node:
         self.next_index: Dict[str, int] = {}
         self.match_index: Dict[str, int] = {}
 
+        # Snapshot state (for log compaction)
+        self.last_snapshot_index: int = -1
+        self.last_snapshot_term: int = 0
+
         # Role
         self.state: Role = Role.FOLLOWER
 
@@ -84,6 +88,8 @@ class Node:
             "current_term": self.current_term,
             "voted_for": self.voted_for,
             "log": self.log,
+            "last_snapshot_index": self.last_snapshot_index,
+            "last_snapshot_term": self.last_snapshot_term,
         }
         target = self._state_file()
         tmp = target.with_suffix(".tmp")
@@ -109,6 +115,8 @@ class Node:
             vf = data.get("voted_for")
             self.voted_for = vf if vf is None or isinstance(vf, str) else None
             self.log = data.get("log", self.log)
+            self.last_snapshot_index = int(data.get("last_snapshot_index", self.last_snapshot_index))
+            self.last_snapshot_term = int(data.get("last_snapshot_term", self.last_snapshot_term))
         except Exception:
             # If corrupted, ignore and start fresh (higher-level code may handle recovery)
             return
@@ -164,6 +172,23 @@ class Node:
                 continue
 
             next_idx = self.next_index.get(p, len(self.log))
+            if next_idx <= self.last_snapshot_index:
+                # Send InstallSnapshot instead
+                resp = peer.on_install_snapshot(
+                    leader_id=self.id,
+                    leader_term=self.current_term,
+                    last_included_index=self.last_snapshot_index,
+                    last_included_term=self.last_snapshot_term,
+                    data={},  # snapshot data
+                )
+                if resp.get("term", 0) > self.current_term:
+                    self.become_follower(resp["term"])
+                    return
+                # After snapshot, set next_index to last_snapshot_index + 1
+                self.next_index[p] = self.last_snapshot_index + 1
+                self.match_index[p] = self.last_snapshot_index
+                continue
+
             prev_log_index = next_idx - 1
             prev_log_term = self.log[prev_log_index]["term"] if prev_log_index >= 0 and prev_log_index < len(self.log) else 0
             entries = self.log[next_idx:]
@@ -229,6 +254,56 @@ class Node:
                 return True
 
         return False
+
+    def create_snapshot(self, snapshot_index: int) -> None:
+        """Create a snapshot up to the given index, compacting the log."""
+        if snapshot_index < self.last_snapshot_index:
+            return  # already snapshotted
+        if snapshot_index >= len(self.log):
+            return  # index out of range
+
+        # Assume snapshot includes state machine state; here we just compact log
+        self.last_snapshot_index = snapshot_index
+        self.last_snapshot_term = self.log[snapshot_index]["term"]
+        # Remove entries up to snapshot_index (keep snapshot_index + 1 onwards)
+        self.log = self.log[snapshot_index + 1:]
+        # Adjust commit_index and last_applied relative to snapshot
+        self.commit_index = max(-1, self.commit_index - (snapshot_index + 1))
+        self.last_applied = max(-1, self.last_applied - (snapshot_index + 1))
+        try:
+            self.persist_state()
+        except Exception:
+            pass
+
+    def on_install_snapshot(self, leader_id: str, leader_term: int, last_included_index: int, last_included_term: int, data: dict) -> dict:
+        """Handle InstallSnapshot RPC to install a snapshot from leader."""
+        if leader_term < self.current_term:
+            return {"term": self.current_term}
+
+        if leader_term > self.current_term:
+            self.become_follower(leader_term, leader_id)
+            try:
+                self.persist_state()
+            except Exception:
+                pass
+
+        # Install the snapshot
+        self.last_snapshot_index = last_included_index
+        self.last_snapshot_term = last_included_term
+        # Discard log entries up to last_included_index
+        self.log = [e for e in self.log if e.get("index", -1) > last_included_index]
+        # Reset commit_index and last_applied
+        self.commit_index = max(self.commit_index, last_included_index)
+        self.last_applied = max(self.last_applied, last_included_index)
+        # Apply snapshot data (e.g., restore state machine)
+        # For simplicity, assume data is empty or handled elsewhere
+
+        try:
+            self.persist_state()
+        except Exception:
+            pass
+
+        return {"term": self.current_term}
 
     def __repr__(self) -> str:
         return f"<Node id={self.id} role={self.state.value} term={self.current_term} peers={len(self.peers)}>"

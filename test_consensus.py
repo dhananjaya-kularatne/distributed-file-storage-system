@@ -185,3 +185,45 @@ def test_conflict_handling_decrements_next_index():
     # replication should succeed (after leader decrements next_index and retries)
     assert res is True
     assert f.log[-1]["cmd"] == "c"
+
+
+def test_crash_recovery_loads_state(tmp_path):
+    state_dir = tmp_path
+    # Simulate a node that persisted state before crash
+    n = Node("crash", peers=["p1"], state_dir=state_dir)
+    n.current_term = 5
+    n.voted_for = "p1"
+    n.log = [{"term": 4, "cmd": "x"}, {"term": 5, "cmd": "y"}]
+    n.persist_state()
+
+    # New instance (restart) should load the state
+    n2 = Node("crash", peers=["p1"], state_dir=state_dir)
+    assert n2.current_term == 5
+    assert n2.voted_for == "p1"
+    assert n2.log == [{"term": 4, "cmd": "x"}, {"term": 5, "cmd": "y"}]
+    # Should start as Follower
+    assert n2.state == Role.FOLLOWER
+
+
+def test_snapshot_creation_and_install():
+    leader = Node("L3", peers=["F2"])
+    leader.log = [{"term": 1, "cmd": "a"}, {"term": 2, "cmd": "b"}, {"term": 3, "cmd": "c"}]
+    leader.create_snapshot(1)  # snapshot up to index 1
+    assert leader.last_snapshot_index == 1
+    assert leader.last_snapshot_term == 2
+    assert leader.log == [{"term": 3, "cmd": "c"}]  # compacted
+
+    # Follower receives InstallSnapshot
+    f = Node("F2", peers=["L3"])
+    f.log = [{"term": 1, "cmd": "a"}]  # behind
+    resp = f.on_install_snapshot(
+        leader_id="L3",
+        leader_term=4,
+        last_included_index=1,
+        last_included_term=2,
+        data={}
+    )
+    assert resp["term"] == 4
+    assert f.last_snapshot_index == 1
+    assert f.last_snapshot_term == 2
+    assert f.log == []  # log compacted
