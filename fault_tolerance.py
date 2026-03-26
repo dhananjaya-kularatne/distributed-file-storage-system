@@ -13,6 +13,7 @@ import threading
 import json
 import os
 import time
+import base64
 from config import NODES, BUFFER_SIZE, STORAGE_DIR
 
 HEARTBEAT_INTERVAL = 2  # 2 seconds
@@ -26,7 +27,6 @@ class Node:
         self.peers = {nid: info for nid, info in NODES.items() if nid != node_id}
         self.is_alive = True
 
-        
         # tracking failed nodes
         self.failed_nodes = set()
         self.last_heartbeat = {nid: time.time() + 5 for nid in self.peers}
@@ -71,32 +71,46 @@ class Node:
                 data += chunk
             if data:
                 message = json.loads(data.decode())
-                print(f"[{self.node_id}] Received: {message}")
+                print(f"[{self.node_id}] Received: {message.get('type')}")
 
                 # handles incoming file save request
                 if message.get("type") == "save_file":
-                    self._save_local(message["filename"], message["data"])
+                    self._save_local(
+                        message["filename"],
+                        message["data"],
+                        message.get("is_binary", False)
+                    )
                     conn.sendall(json.dumps({"status": "ok"}).encode())
 
                 elif message.get("type") == "recovery_sync":
-                    self._save_local(message["filename"], message["data"])
+                    self._save_local(
+                        message["filename"],
+                        message["data"],
+                        message.get("is_binary", False)
+                    )
                     print(f"[{self.node_id}] Restored file from checkpoint: {message['filename']}")
                     conn.sendall(json.dumps({"status": "ok"}).encode())
-                
+
                 else:
                     conn.sendall(json.dumps({"status": "ok"}).encode())
+
                 conn.shutdown(socket.SHUT_WR)
-            
+
         except Exception as e:
             print(f"[{self.node_id}] Connection error: {e}")
         finally:
             conn.close()
 
     # save file locally without replicating
-    def _save_local(self, filename, data):
+    # supports both text and binary files
+    def _save_local(self, filename, data, is_binary=False):
         filepath = os.path.join(self.storage_path, filename)
-        with open(filepath, "w") as f:
-            f.write(data)
+        if is_binary:
+            with open(filepath, "wb") as f:
+                f.write(base64.b64decode(data))
+        else:
+            with open(filepath, "w") as f:
+                f.write(data)
         print(f"[{self.node_id}] Saved file locally: {filename}")
 
     # send message to another node and return the response
@@ -129,13 +143,13 @@ class Node:
                     "from": self.node_id
                 })
                 if response:
-                    self.last_heartbeat[peer_id] = time.time()  #upates the last heartbeat time
+                    self.last_heartbeat[peer_id] = time.time()
 
                     # node will be marked as recovered if it was previously failed
-                    if peer_id in self.failed_nodes:   
+                    if peer_id in self.failed_nodes:
                         print(f"[{self.node_id}] {peer_id} is back online!")
                         self.failed_nodes.discard(peer_id)
-                        self._trigger_recovery(peer_id) # trigger recovery when node comes back online
+                        self._trigger_recovery(peer_id)
 
                     print(f"[{self.node_id}] Heartbeat response from {peer_id}: alive")
                 else:
@@ -154,35 +168,48 @@ class Node:
             time.sleep(1)
 
     # checkpointing - save file to local storage
-    def save_file(self, filename, data):
+    # supports both text and binary files
+    def save_file(self, filename, data, is_binary=False):
         filepath = os.path.join(self.storage_path, filename)
-        with open(filepath, "w") as f:
-            f.write(data)
+        if is_binary:
+            with open(filepath, "wb") as f:
+                f.write(base64.b64decode(data))
+        else:
+            with open(filepath, "w") as f:
+                f.write(data)
         print(f"[{self.node_id}] Saved file: {filename}")
 
-        self._replicate_file(filename, data) # this would replicate file to alive nodes
+        # replicate file to alive nodes
+        self._replicate_file(filename, data, is_binary)
 
     # load file from local storage
+    # automatically detects binary files and returns base64 encoded string
     def load_file(self, filename):
         filepath = os.path.join(self.storage_path, filename)
-        if os.path.exists(filepath):
+        if not os.path.exists(filepath):
+            return None, False
+        try:
+            # try reading as text first
             with open(filepath, "r") as f:
-                return f.read()
-        return None
+                return f.read(), False
+        except UnicodeDecodeError:
+            # it's a binary file - return base64 encoded
+            with open(filepath, "rb") as f:
+                return base64.b64encode(f.read()).decode(), True
 
     # list all files in local storage
     def list_files(self):
         return os.listdir(self.storage_path)
 
-
     # replicate file to all alive peer nodes
-    def _replicate_file(self, filename, data):
+    def _replicate_file(self, filename, data, is_binary=False):
         for peer_id in self.peers:
             if peer_id not in self.failed_nodes:
                 response = self.send_message(peer_id, {
                     "type": "save_file",
                     "filename": filename,
-                    "data": data
+                    "data": data,
+                    "is_binary": is_binary
                 })
                 if response and response.get("status") == "ok":
                     print(f"[{self.node_id}] Replicated {filename} to {peer_id}")
@@ -194,16 +221,20 @@ class Node:
     def _trigger_recovery(self, recovered_node_id):
         print(f"[{self.node_id}] Starting recovery for {recovered_node_id}...")
         for filename in self.list_files():
-            data = self.load_file(filename)
+            data, is_binary = self.load_file(filename)
+            if data is None:
+                continue
             response = self.send_message(recovered_node_id, {
                 "type": "recovery_sync",
                 "filename": filename,
-                "data": data
+                "data": data,
+                "is_binary": is_binary
             })
             if response and response.get("status") == "ok":
                 print(f"[{self.node_id}] Recovered {filename} to {recovered_node_id}")
             else:
                 print(f"[{self.node_id}] Failed to recover {filename} to {recovered_node_id}")
+
 
 if __name__ == "__main__":
     import sys
