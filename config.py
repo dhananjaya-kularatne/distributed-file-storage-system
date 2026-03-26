@@ -4,5 +4,5 @@ NODES = {
     "node3": {"host": "127.0.0.1", "port": 5003},
 }
 
-BUFFER_SIZE = 4096
+BUFFER_SIZE = 65536
 STORAGE_DIR = "storage"

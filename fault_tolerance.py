@@ -119,7 +119,7 @@ class Node:
         port = self.peers[target_id]["port"]
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.settimeout(3)
+                s.settimeout(30)
                 s.connect((host, port))
                 s.sendall(json.dumps(message).encode())
                 s.shutdown(socket.SHUT_WR)
