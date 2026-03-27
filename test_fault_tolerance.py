@@ -99,9 +99,59 @@ def test_recovery():
     node2_recovered.is_alive = False
     time.sleep(1)
 
+def test_no_replication_to_failed_node():
+    print("\n=== Test 4: No Replication to Failed Node ===")
+    node1 = Node("node1")
+    node2 = Node("node2")
+    node3 = Node("node3")
+    node1.start()
+    node2.start()
+    node3.start()
+    time.sleep(4)
+
+    node1.failed_nodes.add("node3")
+    node1.save_file("skip_test.txt", "should not reach node3")
+    time.sleep(2)
+
+    data3, _ = node3.load_file("skip_test.txt")
+    if data3 is None:
+        print("PASSED - file not replicated to failed node3")
+    else:
+        print("FAILED - file was replicated to a failed node")
+
+    node1.is_alive = False
+    node2.is_alive = False
+    node3.is_alive = False
+    time.sleep(1)
+
+
+def test_binary_file_save_and_load():
+    print("\n=== Test 5: Binary File Save and Load ===")
+    import base64
+    node1 = Node("node1")
+    node1.start()
+    time.sleep(1)
+
+    binary_content = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR'
+    encoded = base64.b64encode(binary_content).decode()
+
+    node1.save_file("test_image.png", encoded, is_binary=True)
+    time.sleep(1)
+
+    data, is_binary = node1.load_file("test_image.png")
+    if is_binary and base64.b64decode(data) == binary_content:
+        print("PASSED - binary file saved and loaded correctly")
+    else:
+        print("FAILED - binary file not handled correctly")
+
+    node1.is_alive = False
+    time.sleep(1)
+
 
 if __name__ == "__main__":
 
     test_failure_detection()
     test_replication()
     test_recovery()
+    test_no_replication_to_failed_node()
+    test_binary_file_save_and_load()

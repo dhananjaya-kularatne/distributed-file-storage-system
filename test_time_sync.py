@@ -59,5 +59,22 @@ class TestTimeSync(unittest.TestCase):
         # Verify Lamport clock is incremented by exactly 1
         self.assertEqual(node.lamport_clock, initial_lamport + 1)
 
+    def test_multiple_skews_accumulate(self):
+        node = TimeNode("node1")
+        node.simulate_clock_skew(0.3)
+        node.simulate_clock_skew(0.2)
+        self.assertAlmostEqual(node.clock_offset, 0.5, delta=0.001)
+
+    def test_lamport_starts_at_zero(self):
+        node = TimeNode("node1")
+        self.assertEqual(node.lamport_clock, 0)
+
+    def test_update_lamport_with_lower_value(self):
+        node = TimeNode("node1")
+        node.increment_lamport()  # clock = 1
+        node.increment_lamport()  # clock = 2
+        result = node.update_lamport(0)  # max(2, 0) + 1 = 3
+        self.assertEqual(result, 3)
+
 if __name__ == "__main__":
     unittest.main()

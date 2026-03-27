@@ -230,6 +230,46 @@ def test_persistent_state(tmp_path=None):
         print(f"  voted_for: {node2.voted_for} (expected node2)")
         print(f"  log: {node2.log}")
 
+def test_term_increments_on_election():
+    print("\n=== Test 7: Term is at Least 1 After Election ===")
+    node1 = Node("node1")
+    node2 = Node("node2")
+    node3 = Node("node3")
+    node1.start()
+    node2.start()
+    node3.start()
+
+    leader = wait_for_leader([node1, node2, node3], timeout=15)
+    if not leader:
+        print("FAILED - no leader elected")
+        stop_all([node1, node2, node3])
+        return
+
+    if leader.current_term >= 1:
+        print(f"PASSED - term is {leader.current_term} after election")
+    else:
+        print("FAILED - term should be at least 1")
+
+    stop_all([node1, node2, node3])
+
+
+def test_node_rejects_stale_vote():
+    print("\n=== Test 8: Node Rejects Stale Vote Request ===")
+    node = Node("node1")
+    node.current_term = 10
+
+    response = node.on_request_vote(
+        candidate_id="node2",
+        candidate_term=5,
+        last_log_index=-1,
+        last_log_term=0
+    )
+
+    if response["voteGranted"] == False and response["term"] == 10:
+        print("PASSED - stale vote request rejected correctly")
+    else:
+        print("FAILED - stale vote was not rejected")
+
 
 if __name__ == "__main__":
     test_leader_election()
@@ -243,5 +283,9 @@ if __name__ == "__main__":
     test_raft_status()
     time.sleep(2)
     test_persistent_state()
+    time.sleep(2)
+    test_term_increments_on_election()
+    time.sleep(2)
+    test_node_rejects_stale_vote()
     print("\n=== All tests completed ===")
     
