@@ -85,5 +85,30 @@ class TestReplication(unittest.TestCase):
         expected_path = os.path.join(self.replicator.storage_path, "incoming.bin")
         mock_op.assert_any_call(expected_path, "wb", encoding=None)
 
+    @patch('replication.socket.socket')
+    def test_replicate_skips_on_connection_error(self, mock_socket):
+        mock_sock_instance = MagicMock()
+        mock_sock_instance.connect.side_effect = ConnectionRefusedError
+        mock_socket.return_value.__enter__.return_value = mock_sock_instance
+
+        try:
+            self.replicator.replicate_to_followers("test.txt", "data", 1)
+            print("PASSED - replication does not crash on connection error")
+        except Exception as e:
+            self.fail(f"FAILED - exception raised: {e}")
+
+    def test_handle_missing_filename(self):
+        message = {
+            "type": "replicate_file",
+            "data": "some data",
+            "is_binary": False,
+            "lamport_clock": 5
+        }
+        try:
+            self.replicator.handle_replication_request(message)
+            print("PASSED - missing filename handled gracefully")
+        except Exception as e:
+            self.fail(f"FAILED - crashed on missing filename: {e}")
+
 if __name__ == '__main__':
     unittest.main()
