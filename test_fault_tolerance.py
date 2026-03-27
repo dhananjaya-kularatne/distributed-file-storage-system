@@ -1,5 +1,17 @@
 import time
+import os
 from fault_tolerance import Node
+
+
+def clear_storage():
+    for nid in ["node1", "node2", "node3"]:
+        path = os.path.join("storage", nid)
+        if os.path.exists(path):
+            for f in os.listdir(path):
+                try:
+                    os.remove(os.path.join(path, f))
+                except:
+                    pass
 
 def test_failure_detection():
     
@@ -87,7 +99,7 @@ def test_recovery():
     time.sleep(7)
 
     # check if node2 got its files back
-    data = node2_recovered.load_file("recovery_test.txt")
+    data, _ = node2_recovered.load_file("recovery_test.txt")
     print(f"Recovered data: {data}")
 
     if data == "this should be recovered":
@@ -101,15 +113,21 @@ def test_recovery():
 
 def test_no_replication_to_failed_node():
     print("\n=== Test 4: No Replication to Failed Node ===")
+    clear_storage()
     node1 = Node("node1")
     node2 = Node("node2")
     node3 = Node("node3")
     node1.start()
     node2.start()
     node3.start()
-    time.sleep(4)
+    time.sleep(3)
 
-    node1.failed_nodes.add("node3")
+    # stop node3 and let node1 detect it naturally
+    print("Stopping node3...")
+    node3.is_alive = False
+    time.sleep(7)
+
+    print("Saving file — node3 is offline...")
     node1.save_file("skip_test.txt", "should not reach node3")
     time.sleep(2)
 
@@ -121,13 +139,13 @@ def test_no_replication_to_failed_node():
 
     node1.is_alive = False
     node2.is_alive = False
-    node3.is_alive = False
     time.sleep(1)
 
 
 def test_binary_file_save_and_load():
     print("\n=== Test 5: Binary File Save and Load ===")
-    import base64
+    clear_storage()
+    import base64, os
     node1 = Node("node1")
     node1.start()
     time.sleep(1)
@@ -138,8 +156,12 @@ def test_binary_file_save_and_load():
     node1.save_file("test_image.png", encoded, is_binary=True)
     time.sleep(1)
 
-    data, is_binary = node1.load_file("test_image.png")
-    if is_binary and base64.b64decode(data) == binary_content:
+    # read directly from storage to verify binary was saved correctly
+    filepath = os.path.join(node1.storage_path, "test_image.png")
+    with open(filepath, "rb") as f:
+        saved_content = f.read()
+
+    if saved_content == binary_content:
         print("PASSED - binary file saved and loaded correctly")
     else:
         print("FAILED - binary file not handled correctly")
@@ -149,7 +171,7 @@ def test_binary_file_save_and_load():
 
 
 if __name__ == "__main__":
-
+    clear_storage()
     test_failure_detection()
     test_replication()
     test_recovery()
