@@ -9,7 +9,7 @@
 |------|-----------------|-------|-----------|
 | Kularatne R.A.D | IT24103431 | it24103431@my.sliit.lk | Fault Tolerance |
 | Peiris M.D.D.P | IT24100532 | it24100532@my.sliit.lk | Consensus & Agreement |
-| Samaraweera S.K.U.S.S | IT24101848 | it24101848@my.sliit.lk | Data Replication & Consistency |
+| Samaraweera S.K.U.S.S | IT24101841 | it24101841@my.sliit.lk | Data Replication & Consistency |
 | Srinayaka S.P.B.M. | IT24103435 | it24103435@my.sliit.lk | Time Synchronization |
 
 ---
