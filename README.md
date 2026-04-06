@@ -242,8 +242,3 @@ Raft RPC ports are automatically set to node port + 1000:
 3. The content will be identical — the file was replicated to all nodes on upload
 
 ---
-
-## Links
-
-- **GitHub Repository:** [https://github.com/dhananjaya-kularatne/distributed-file-storage-system.git]
-- **YouTube Presentation:** []
